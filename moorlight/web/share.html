@@ -87,7 +87,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   color: var(--muted); }
 #app.full #mini-nav { display: flex; }
 #mini-depth { position: absolute; z-index: 2; left: 50%; transform: translateX(-50%);
-  bottom: calc(108px + env(safe-area-inset-bottom, 0px)); display: none; grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  bottom: calc(108px + env(safe-area-inset-bottom, 0px)); display: none; grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
   align-items: center; gap: 8px; width: min(440px, calc(100% - 24px)); padding: 2px 10px; border-radius: 10px; }
 #mini-depth span { font: 0.8rem var(--font-data); color: var(--muted); }
 #mini-depth output { text-align: right; font: 0.85rem var(--font-data); font-variant-numeric: tabular-nums; }
@@ -143,6 +143,9 @@ details[hidden] { display: none; }
 .plane .name { min-width: 0; overflow-wrap: anywhere; font-size: 0.9rem; }
 .plane .chip { flex: none; width: 14px; height: 14px; border: 2px solid; border-radius: 2px; }
 #slice-lock[aria-pressed="true"], #mini-lock[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+#slice-live[aria-pressed="false"], #mini-live[aria-pressed="false"] { color: var(--muted); }
+/* with the live plane off, its controls step back */
+#app.live-off .slice-box .ctl-row, #app.live-off #mini-depth input, #app.live-off #mini-depth output { opacity: 0.4; }
 #app:not(.slicing) .slice-only { display: none !important; }
 .help { margin: 0; color: var(--muted); font-size: 0.82rem; max-width: 65ch; }
 kbd { font: 0.8rem var(--font-data); }
@@ -187,6 +190,7 @@ kbd { font: 0.8rem var(--font-data); }
       <output id="mini-depth-out" for="mini-depth-range">+0.0 Å</output>
       <button id="mini-lock" type="button" aria-pressed="false" title="Fix the plane in the molecule (L)">Fix plane</button>
       <button id="mini-save" type="button" title="Keep this plane and place another (S)">Save</button>
+      <button id="mini-live" type="button" aria-pressed="true" title="Show or hide the moving plane">Live plane on</button>
     </div>
     <div id="mini-nav" class="fab" role="group" aria-label="Structure">
       <button id="mini-atoms" type="button" aria-pressed="true" title="Show or hide the structure (A)">Atoms</button>
@@ -226,6 +230,7 @@ kbd { font: 0.8rem var(--font-data); }
           <output id="slice-tilt-y-out" for="slice-tilt-y">0°</output>
         </div>
         <div class="view-row">
+          <button id="slice-live" type="button" aria-pressed="true" title="Show or hide the moving plane; saved planes stay">Live plane on</button>
           <button id="slice-lock" type="button" aria-pressed="false" title="Fix the plane in the molecule (L)">Fix plane</button>
           <button id="slice-atoms" type="button" title="Best plane through the labelled atoms (tap atoms to label them)">Through labelled atoms</button>
           <button id="slice-face" type="button" title="Plane through the centre, facing you">Face me</button>
@@ -261,7 +266,7 @@ kbd { font: 0.8rem var(--font-data); }
         pans, the wheel changes the level of the first visible map, <kbd>F</kbd> shows the view alone, <kbd>A</kbd> hides the structure, <kbd>L</kbd> fixes the
         slice, <kbd>S</kbd> saves it. The slice faces you and turns with the molecule until you fix it; tilt it with the two angle sliders,
         or label three or more atoms and put it through them. A thick slice shows the strongest value within the
-        thickness, so features just off the plane appear as well. Save plane keeps a plane in place (with its
+        thickness, so features just off the plane appear as well. Live plane off hides the moving plane and leaves the saved ones. Save plane keeps a plane in place (with its
         own colour, in every map style) so you can place another. In the plane list, tap a name to look at that plane;
         Copy adds a parallel plane at the copy offset; Edit makes it the live plane again. Planes marked "(yours)" are kept in this browser; the others come with the
         page.</p>

@@ -492,7 +492,8 @@ function scheduleContour(now = false) {
 // molecule), at an adjustable depth. It shows the active map (the first visible one): green +, red - (blue for
 // 2mFo-DFc-like maps), stronger towards 3 x level, with contour lines at 1, 2, 4, 8 ... x level. The plane is dark
 // glass: atoms behind it are dimmed, atoms in front stay bright.
-const SLICE = { mesh: null, halo: null, map: null, failed: false, depth: 0, tiltX: 0, tiltY: 0, thick: 0, lock: null };   // lock: {c, Rt}
+const SLICE = { mesh: null, halo: null, map: null, failed: false, depth: 0, tiltX: 0, tiltY: 0, thick: 0, lock: null,
+  off: false };   // off: live plane hidden (saved planes stay)   // lock: {c, Rt}
 const SLICE_VS = `
 uniform mat4 uPlane;
 varying vec3 vModel;
@@ -586,7 +587,7 @@ function setPlaneMap(u, m) {
   u.uLevel.value = m.level;
 }
 function updateSlice() {
-  const m = S.style === "slice" ? activeMap() : null;
+  const m = S.style === "slice" && !SLICE.off ? activeMap() : null;
   if (!m) {
     if (SLICE.mesh) SLICE.mesh.visible = false;
     if (SLICE.halo) SLICE.halo.visible = false;
@@ -674,7 +675,10 @@ function addSavedPlane(pl) {
   S.planes.push(pl);
 }
 function savePlane() {
-  if (S.style !== "slice" || !SLICE.mesh || !SLICE.mesh.visible) { status("Switch to Slice and place the plane first."); return; }
+  if (S.style !== "slice" || !SLICE.mesh || !SLICE.mesh.visible) {
+    status(SLICE.off ? "Turn the live plane on to place a new one." : "Switch to Slice and place the plane first.");
+    return;
+  }
   const r = livePlacement();
   planeCount += 1;
   addSavedPlane({ name: `Plane ${planeCount}`, color: PLANE_COLORS[(planeCount - 1) % PLANE_COLORS.length],
@@ -723,6 +727,7 @@ function editPlane(i) {        // the saved plane becomes the live one again
   const pl = S.planes[i];
   removePlane(i);
   if (S.style !== "slice") setStyle("slice");
+  if (SLICE.off) setLivePlane(true);
   SLICE.lock = { c: pl.p0.clone(), Rt: pl.Rt.clone() };
   for (const b of [$("#slice-lock"), $("#mini-lock")]) { b.setAttribute("aria-pressed", "true"); b.textContent = "Release"; }
   setTilt("tiltX", 0); setTilt("tiltY", 0); setSliceDepth(0); setThickness(pl.thick);
@@ -783,6 +788,16 @@ function setTilt(axis, deg) {
   const id = axis === "tiltX" ? "slice-tilt-x" : "slice-tilt-y";
   $(`#${id}`).value = String(SLICE[axis]);
   $(`#${id}-out`).textContent = `${Math.round(SLICE[axis])}°`;
+  redraw();
+}
+function setLivePlane(on) {
+  SLICE.off = !on;
+  for (const b of [$("#slice-live"), $("#mini-live")]) {
+    b.setAttribute("aria-pressed", String(on));
+    b.textContent = on ? "Live plane on" : "Live plane off";
+  }
+  $("#app").classList.toggle("live-off", !on);
+  updateSlice();
   redraw();
 }
 function setThickness(t) {
@@ -1162,6 +1177,7 @@ for (const b of [$("#slice-lock"), $("#mini-lock")]) b.addEventListener("click",
 $("#slice-tilt-x").addEventListener("input", (e) => setTilt("tiltX", +e.target.value));
 $("#slice-tilt-y").addEventListener("input", (e) => setTilt("tiltY", +e.target.value));
 $("#slice-face").addEventListener("click", faceMe);
+for (const b of [$("#slice-live"), $("#mini-live")]) b.addEventListener("click", () => setLivePlane(SLICE.off));
 $("#slice-thick").addEventListener("input", (e) => setThickness(+e.target.value));
 $("#copy-offset").addEventListener("input", (e) => {
   const v = +e.target.value;
