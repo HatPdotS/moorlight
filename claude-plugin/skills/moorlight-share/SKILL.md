@@ -50,7 +50,9 @@ and scipy). There is no server and no port.
      - `--plane "Azo=-/102 C8, -/102 N9, -/102 N10, -/102 C11"` goes through these atoms.
      - `--plane "Zn site=A/301 ZN"` (one atom) is that atom's coordination plane.
      - The option is repeatable.
-     - `init`'s planes show the first difference map; set a plane's `map` to show density instead.
+     - In the page every plane shows the map in use (the first visible one) at its slider level, so switching
+       maps or levels changes all planes. A plane's `map` and `level` (`init` sets the first difference map) are
+       only its start: they apply while that map is the one in use and its level has not been moved.
      - Without `--plane`, `init` adds up to `--planes` (default 5) automatic planes:
        - at the strongest features of the first difference map (peaks beyond `--min`, default 2.5 × its level,
          within 1.5 Å of an atom);
@@ -175,8 +177,10 @@ and scipy). There is no server and no port.
   - `copies`: extra parallel planes at these offsets from it (Å, e.g. `[-1, 1]`), named "<name> +1 Å".
   - `thickness`: Å. A thick slice shows the strongest value within it, with its sign kept.
   - `radius`: half the square's side (default `contour_radius`).
-  - `map`: the map shown (default the first visible).
-  - `level`: fixed contour level for this plane (default: follows the map's slider).
+  - `map`: the map the plane was made for (default the first visible). The page shows the map in use instead
+    when the viewer switches maps.
+  - `level`: start level for this plane on its `map`. Choosing the plane in the list sets the map to it; any
+    slider or scroll change on that map then moves all its planes.
   - `color`: outline colour, CSS hex. `visible`: default true.
 
 **Atom specs**:

@@ -724,11 +724,15 @@ function livePlacement() {
   _p0.copy(c).addScaledVector(_n, d);
   return r;
 }
-// per frame: place the live plane; atoms inside it get a halo; saved planes follow their map's level
+// per frame: place the live plane; atoms inside it get a halo; saved planes show the map in use (the first visible
+// one; their own map when none is shown) at its level
 function sliceFrame() {
+  const shown = activeMap();
   for (const pl of S.planes) {
     pl.mesh.visible = pl.visible;
-    pl.mesh.material.uniforms.uLevel.value = pl.level ?? pl.map.level;
+    const m = shown || pl.map, u = pl.mesh.material.uniforms;
+    if (pl.shown !== m) { setPlaneMap(u, m); pl.shown = m; }
+    u.uLevel.value = m === pl.map && pl.level != null ? pl.level : m.level;
   }
   if (!SLICE.mesh || !SLICE.mesh.visible) return;
   const r = livePlacement();
@@ -771,6 +775,7 @@ function addSavedPlane(pl) {
   const u = pl.mesh.material.uniforms;
   u.uPlane.value.copy(M);
   setPlaneMap(u, pl.map);
+  pl.shown = pl.map;
   u.uNormal.value.setFromMatrixColumn(pl.Rt, 2).normalize();
   u.uThick.value = pl.thick;
   S.planes.push(pl);
@@ -800,13 +805,14 @@ function loadPresetPlanes() {
 }
 // turn the view onto a saved plane: centred on it, facing it
 function goToPlane(i) {
-  const pl = S.planes[i], lvl = pl.level;
+  const pl = S.planes[i], m = activeMap() || pl.map;
   pl.visible = true;
-  if (lvl != null) setLevel(pl.map, lvl);    // the map takes the plane's level, so the plane, contours and slider agree
+  // a preset made on the map in use brings its level along, so the plane, contours and slider agree
+  if (pl.level != null && m === pl.map) setLevel(m, pl.level);
   renderPlaneList();
   S.depth = 0;
   animateTo(pl.p0.clone(), new THREE.Quaternion().setFromRotationMatrix(pl.Rt.clone().transpose()));
-  status(`${pl.name}${lvl != null ? `, contoured at ${fmtLevel(pl.map)}` : ""}`);
+  status(`${pl.name}: ${m.info.name} at ${fmtLevel(m)}`);
 }
 // a parallel copy of a plane, moved along its normal by the copy offset; it belongs to the viewer
 function copyPlane(i) {
@@ -850,7 +856,7 @@ function renderPlaneList() {
       `<button type="button" aria-label="Delete">&times;</button>`;
     const go = li.querySelector(".go");
     go.textContent = pl.name + (pl.preset ? "" : " (yours)");
-    go.title = `Look at ${pl.name}: ${pl.map.info.name}${pl.thick ? `, ${pl.thick.toFixed(1)} Å thick` : ""}`;
+    go.title = `Look at ${pl.name}${pl.thick ? ` (${pl.thick.toFixed(1)} Å thick)` : ""}`;
     go.addEventListener("click", () => goToPlane(i));
     const cb = li.querySelector("input");
     cb.checked = pl.visible;
