@@ -195,7 +195,8 @@ and scipy). There is no server and no port.
 
 - **Maps:** visibility and a log-scale level slider for each map.
 - **Maps drawn as:** Mesh or Slice. Switching or changing maps never changes this mode. Slice mode shows slices
-  only (no contours), of the map in use (the first visible), and no slices at all when every map is off. In slice mode:
+  only (no contours), of the map in use (the first visible); with every map off the planes are shown empty. In
+  slice mode:
   - the live plane (yellow outline) faces the viewer and turns with the molecule until it is fixed;
   - sliders for depth, thickness and two tilts;
   - buttons: Fix plane, Through labelled atoms (best plane through three or more tapped atoms), Face me, and

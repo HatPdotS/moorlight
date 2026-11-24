@@ -578,7 +578,7 @@ uniform sampler3D uMap;
 uniform mat3 uGinv;
 uniform vec3 uOrigin, uN, uPos, uNeg, uNormal;
 uniform float uLevel, uThick;
-uniform int uSigned, uWrap;
+uniform int uSigned, uWrap, uEmpty;
 varying vec3 vModel;
 varying vec2 vXY;
 // a map stored on a block or box (not the periodic cell) has no values outside it
@@ -590,6 +590,7 @@ float sampleAt(vec3 p) {
   return outside(idx) ? 0.0 : texture(uMap, (idx.zyx + 0.5) / uN.zyx).r;
 }
 void main() {
+  if (uEmpty == 1) { gl_FragColor = vec4(0.0, 0.0, 0.0, 0.45); return; }   // no map shown: the bare plane
   if (outside(uGinv * (vModel - uOrigin))) discard;
   // thin plane: the value on it; thick slice: the strongest value (sign kept) within +/- uThick / 2 of it
   float v = sampleAt(vModel);
@@ -633,7 +634,7 @@ function makePlaneMesh(outlineColor) {
     uniforms: {
       uMap: { value: null }, uPlane: { value: new THREE.Matrix4() }, uGinv: { value: new THREE.Matrix3() },
       uOrigin: { value: new THREE.Vector3() }, uN: { value: new THREE.Vector3() }, uPos: { value: new THREE.Color() },
-      uNeg: { value: new THREE.Color() }, uLevel: { value: 1 }, uSigned: { value: 1 }, uWrap: { value: 1 },
+      uNeg: { value: new THREE.Color() }, uLevel: { value: 1 }, uSigned: { value: 1 }, uWrap: { value: 1 }, uEmpty: { value: 0 },
       uNormal: { value: new THREE.Vector3(0, 0, 1) }, uThick: { value: 0 },
     },
   });
@@ -661,8 +662,7 @@ function setPlaneMap(u, m) {
   u.uLevel.value = m.level;
 }
 function updateSlice() {
-  const m = S.style === "slice" && !SLICE.off ? activeMap() : null;
-  if (!m) {
+  if (S.style !== "slice" || SLICE.off) {
     if (SLICE.mesh) SLICE.mesh.visible = false;
     if (SLICE.halo) SLICE.halo.visible = false;
     return;
@@ -677,8 +677,12 @@ function updateSlice() {
     SLICE.halo.frustumCulled = false;
     world.add(SLICE.halo);
   }
-  if (SLICE.map !== m) { SLICE.map = m; setPlaneMap(SLICE.mesh.material.uniforms, m); }
-  SLICE.mesh.material.uniforms.uLevel.value = m.level;
+  const m = activeMap(), u = SLICE.mesh.material.uniforms;
+  u.uEmpty.value = m ? 0 : 1;               // with every map off the plane stays, empty
+  if (m) {
+    if (SLICE.map !== m) { SLICE.map = m; setPlaneMap(u, m); }
+    u.uLevel.value = m.level;
+  }
   SLICE.mesh.visible = SLICE.halo.visible = true;
 }
 // where the live plane is: facing the viewer through the focus (or where it was fixed), tilted, at the chosen depth
@@ -699,13 +703,14 @@ function livePlacement() {
   return r;
 }
 // per frame: place the live plane; atoms inside it get a halo; saved planes show the map in use (the first visible
-// one) at its level, in slice mode only and not at all when no map is shown
+// one) at its level, in slice mode only, and stay empty when no map is shown
 function sliceFrame() {
   const m = activeMap();
   for (const pl of S.planes) {
-    pl.mesh.visible = pl.visible && S.style === "slice" && !!m;
-    if (!pl.mesh.visible) continue;
+    pl.mesh.visible = pl.visible && S.style === "slice";
     const u = pl.mesh.material.uniforms;
+    u.uEmpty.value = m ? 0 : 1;
+    if (!pl.mesh.visible || !m) continue;
     if (pl.shown !== m) { setPlaneMap(u, m); pl.shown = m; }
     u.uLevel.value = m === pl.map && pl.level != null ? pl.level : m.level;
   }
@@ -749,7 +754,7 @@ function addSavedPlane(pl) {
   pl.mesh.matrixWorldNeedsUpdate = true;
   const u = pl.mesh.material.uniforms;
   u.uPlane.value.copy(M);
-  setPlaneMap(u, pl.map);
+  if (pl.map) setPlaneMap(u, pl.map);     // a page without maps has empty planes only
   pl.shown = pl.map;
   u.uNormal.value.setFromMatrixColumn(pl.Rt, 2).normalize();
   u.uThick.value = pl.thick;
@@ -763,7 +768,7 @@ function savePlane() {
   const r = livePlacement();
   planeCount += 1;
   addSavedPlane({ name: `Plane ${planeCount}`, color: PLANE_COLORS[(planeCount - 1) % PLANE_COLORS.length],
-    p0: _p0.clone(), Rt: _Rt.clone(), r, thick: SLICE.thick, map: SLICE.map, level: null, visible: true });
+    p0: _p0.clone(), Rt: _Rt.clone(), r, thick: SLICE.thick, map: activeMap() || SLICE.map || S.maps[0], level: null, visible: true });
   renderPlaneList(); storePlanes(); redraw();
   status(`Plane ${planeCount} saved. Move the live plane to place the next one.`);
 }
@@ -851,7 +856,7 @@ function renderPlaneList() {
 function storePlanes() {
   try {
     localStorage.setItem(PLANE_KEY, JSON.stringify({ count: planeCount, planes: S.planes.filter((pl) => !pl.preset).map((pl) => ({ name: pl.name,
-      color: pl.color, p0: pl.p0.toArray(), Rt: pl.Rt.toArray(), r: pl.r, thick: pl.thick, map: pl.map.info.name,
+      color: pl.color, p0: pl.p0.toArray(), Rt: pl.Rt.toArray(), r: pl.r, thick: pl.thick, map: pl.map ? pl.map.info.name : null,
       level: pl.level, visible: pl.visible })) }));
   } catch (err) { /* storage blocked */ }
 }
