@@ -567,8 +567,10 @@ function renderStop(s) {
     p.textContent = para.trim();
     box.appendChild(p);
   }
-  $("#prev").disabled = !n || S.stop <= 0;
-  $("#next").disabled = !n || S.stop >= n - 1;
+  $("#prev").disabled = $("#mini-prev").disabled = !n || S.stop <= 0;
+  $("#next").disabled = $("#mini-next").disabled = !n || S.stop >= n - 1;
+  $("#mini-pos").textContent = n ? `${S.stop + 1}/${n} ${s.name || ""}` : (s.name || "");
+  $("#mini-prev").hidden = $("#mini-next").hidden = !n;
   try { if (n) history.replaceState(null, "", `#stop-${S.stop + 1}`); } catch (e) { /* not allowed in some frames */ }
   status("");
 }
@@ -664,6 +666,7 @@ window.addEventListener("keydown", (e) => {
   if (e.target.closest && e.target.closest("input")) return;
   if (e.key === "ArrowRight") applyStop(S.stop + 1);
   else if (e.key === "ArrowLeft") applyStop(S.stop - 1);
+  else if (e.key === "f" || e.key === "F") setFull(!$("#app").classList.contains("full"));
 });
 
 $("#prev").addEventListener("click", () => applyStop(S.stop - 1));
@@ -677,12 +680,23 @@ $("#hyd").addEventListener("click", (e) => {
   S.mols.forEach((m, k) => { m.hideH = !show; buildMolecule(k); });
   e.currentTarget.setAttribute("aria-pressed", String(show));
 });
-$("#collapse").addEventListener("click", (e) => {
-  const panel = $("#panel");
-  const collapsed = panel.classList.toggle("collapsed");
-  e.currentTarget.textContent = collapsed ? "Show panel" : "Hide panel";
-  e.currentTarget.setAttribute("aria-expanded", String(!collapsed));
-});
+const svgIcon = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ` +
+  `stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
+const ICON_FULL = svgIcon("M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5");
+const ICON_MENU = svgIcon("M4 6h16M4 12h16M4 18h16");
+$("#fullscreen").innerHTML = ICON_FULL;
+function setFull(on) {
+  $("#app").classList.toggle("full", on);
+  const b = $("#fullscreen");
+  b.setAttribute("aria-pressed", String(on));
+  b.setAttribute("aria-label", on ? "Show menus" : "Full screen view");
+  b.innerHTML = on ? ICON_MENU : ICON_FULL;
+  try { localStorage.setItem("moorlight-share-full", on ? "1" : "0"); } catch (err) { /* storage blocked */ }
+}
+$("#fullscreen").addEventListener("click", () => setFull(!$("#app").classList.contains("full")));
+$("#mini-prev").addEventListener("click", () => applyStop(S.stop - 1));
+$("#mini-next").addEventListener("click", () => applyStop(S.stop + 1));
+try { if (localStorage.getItem("moorlight-share-full") === "1") setFull(true); } catch (err) { /* storage blocked */ }
 
 // ------------------------------------------------------------------- start
 async function start() {

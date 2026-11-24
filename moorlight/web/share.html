@@ -4,8 +4,9 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap">
 <style>
-/* Layout: a Coot-black viewport filling the screen; the tour panel sits below it on phones and to its right on
-   wide screens. One deliberate dark look (maps read best on black), so no light variant. */
+/* Layout: a Coot-black viewport; the tour panel sits below it on an upright phone and beside it in landscape and
+   on wide screens. Full screen hides header and panel and leaves a small floating stop bar. One deliberate dark
+   look (maps read best on black), so no light variant. */
 :root {
   --ink: #000000;          /* viewport, as in Coot */
   --panel: #111418;
@@ -26,7 +27,11 @@ html { height: 100%; box-sizing: border-box; }
 body { height: 100%; margin: 0; overflow: hidden; background: var(--panel); color: var(--fg);
   font: 15px/1.45 var(--font-ui); -webkit-text-size-adjust: 100%; }
 button, input { font: inherit; color: inherit; }
-#app { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; }
+#app { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas: "head" "view" "panel"; }
+header { grid-area: head; }
+#viewport { grid-area: view; }
+#panel { grid-area: panel; }
 
 header { display: flex; align-items: center; gap: 12px; min-width: 0; padding-block: 8px;
   padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
@@ -62,8 +67,24 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   display: flex; flex-direction: column; gap: 14px; padding-block: 12px 16px;
   padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
   border-top: 1px solid var(--line); background: var(--panel); }
-#panel.collapsed { max-height: none; }
-#panel.collapsed .hideable { display: none; }
+
+/* floating controls on the viewport */
+.fab { position: absolute; z-index: 2; background: rgba(17, 20, 24, 0.72); border-color: rgba(154, 164, 175, 0.35);
+  -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
+#fullscreen { top: 8px; right: max(8px, env(safe-area-inset-right, 0px)); min-width: 40px; min-height: 40px;
+  display: grid; place-items: center; padding: 0; }
+#fullscreen svg { width: 20px; height: 20px; }
+#mini-nav { position: absolute; z-index: 2; left: 50%; transform: translateX(-50%);
+  bottom: calc(8px + env(safe-area-inset-bottom, 0px)); display: none; align-items: center; gap: 6px;
+  max-width: calc(100% - 24px); padding: 4px; border-radius: 10px; }
+#mini-nav span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 4px;
+  font: 500 0.82rem var(--font-data); color: var(--fg); }
+#mini-nav button { flex: none; }
+
+#app.full { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "view"; }
+#app.full header, #app.full #panel { display: none; }
+#app.full #mini-nav { display: flex; }
+#app.full #status { bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
 .stop-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .eyebrow { font: 500 0.72rem var(--font-data); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
 h2 { margin: 0; font-size: 1.05rem; font-weight: 600; line-height: 1.25; text-wrap: balance; }
@@ -85,11 +106,18 @@ h3 { margin: 0 0 6px; font: 500 0.72rem var(--font-data); letter-spacing: 0.08em
 .help { margin: 0; color: var(--muted); font-size: 0.82rem; max-width: 65ch; }
 kbd { font: 0.8rem var(--font-data); }
 
-@media (min-width: 900px) {
-  #app { grid-template-columns: minmax(0, 1fr) 380px; grid-template-rows: auto minmax(0, 1fr); }
-  header { grid-column: 1 / -1; }
-  #panel { grid-column: 2; grid-row: 2; max-height: none; border-top: 0; border-left: 1px solid var(--line); }
-  #collapse { display: none; }
+@media (min-width: 900px) and (min-height: 561px) {
+  #app { grid-template-columns: minmax(0, 1fr) 380px; grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas: "head head" "view panel"; }
+  #panel { max-height: none; border-top: 0; border-left: 1px solid var(--line); }
+}
+/* phone turned sideways: the view keeps the full height, header and panel share a column on the right */
+@media (orientation: landscape) and (max-height: 560px) {
+  #app { grid-template-columns: minmax(0, 1fr) min(330px, 42vw); grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas: "view head" "view panel"; }
+  header { border-left: 1px solid var(--line); padding-left: 12px; }
+  .desc { display: none; }
+  #panel { max-height: none; border-top: 0; border-left: 1px solid var(--line); padding-left: 12px; }
 }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
 </style>
@@ -110,21 +138,27 @@ kbd { font: 0.8rem var(--font-data); }
     <div id="labels"></div>
     <div id="status" aria-live="polite"></div>
     <div id="loading">Unpacking maps…</div>
+    <button id="fullscreen" class="fab" type="button" aria-pressed="false" aria-label="Full screen view"
+      title="Full screen view (F)"></button>
+    <div id="mini-nav" class="fab" role="group" aria-label="Tour stops">
+      <button id="mini-prev" type="button" aria-label="Previous stop">&#9664;</button>
+      <span id="mini-pos"></span>
+      <button id="mini-next" type="button" aria-label="Next stop">&#9654;</button>
+    </div>
   </div>
   <section id="panel" aria-label="Tour and maps">
     <div>
       <div class="stop-head">
         <span id="stop-count" class="eyebrow"></span>
-        <button id="collapse" type="button" aria-expanded="true">Hide panel</button>
       </div>
-      <h2 id="stop-name" class="hideable"></h2>
+      <h2 id="stop-name"></h2>
     </div>
-    <div id="stop-text" class="hideable"></div>
-    <div class="hideable">
+    <div id="stop-text"></div>
+    <div>
       <h3>Maps</h3>
       <ul id="map-list"></ul>
     </div>
-    <div class="hideable">
+    <div>
       <h3>View</h3>
       <div class="view-row">
         <button id="slab-down" type="button">Slab &minus;</button>
@@ -134,9 +168,10 @@ kbd { font: 0.8rem var(--font-data); }
         <button id="reset" type="button">Back to stop view</button>
       </div>
     </div>
-    <p class="help hideable">Drag to rotate, pinch to zoom, move two fingers to pan. Tap an atom for its label and the
+    <p class="help">Drag to rotate, pinch to zoom, move two fingers to pan. Tap an atom for its label and the
       map values there; double-tap to centre on it. With a mouse: right-drag zooms, Ctrl-drag pans, the wheel changes
-      the level of the first visible map, <kbd>&larr;</kbd> <kbd>&rarr;</kbd> step through the stops.</p>
+      the level of the first visible map, <kbd>&larr;</kbd> <kbd>&rarr;</kbd> step through the stops. The button at the
+      top right of the view (or <kbd>F</kbd>) shows the view alone; tap it again for the menus.</p>
   </section>
 </div>
 

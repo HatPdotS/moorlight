@@ -20,7 +20,17 @@ Nothing runs on the cluster after the page is written.
 
 ## Workflow
 
-1. **Write the spec** (`spec.json`, format below). Paths are relative to the spec file.
+0. **Fast start**: `moorlight share init MODEL "MAP=name" ["MAP2=name" ...] -o spec.json [--title "Cage 3.5 ps"]
+   [--units absolute --unit-label SD] [--level 4] [--min 10] [--stops 5] [--build page.html]`.
+   - Takes about 10 s and writes `spec.json` plus `spec.check.txt` (the full `--check` output).
+   - The spec holds an overview and one stop per group of strong features of the first map: peaks beyond `--min`
+     (default 2.5 × level) within 1.5 Å of an atom.
+   - Residues with more than five heavy atoms get a stop each (guests and ligands, shown first, planar ones
+     edge-on). Smaller residues (metals, waters, counter-ions) are grouped by name and shown at the strongest one.
+   - Each stop has its view, level and labels, and a draft text that states the numbers.
+   - Usually you only reword the texts, add what the user's notes say about reliability, drop or reorder stops, and
+     build. `--build` gives a page right away; the drafts are factual and fine for a first look.
+1. **Write or edit the spec** (`spec.json`, format below). Paths are relative to the spec file.
 2. **Get the numbers**: `moorlight share spec.json --check [--at SPEC ...] [--near SPEC --radius R ...]`.
    It prints:
    - for each map, its strongest peaks of each sign, each listed once next to the model, with the nearest atom;
@@ -29,7 +39,12 @@ Nothing runs on the cluster after the page is written.
      - the peaks of every difference map within its radius, with coordinates, the nearest drawn atom and the
        height above the frame plane (`h`);
    - for `--at`, the values at atoms or residues;
-   - for `--near`, the peaks around an atom, residue or `"x, y, z"`.
+   - for `--near`, the atoms and the peaks around an atom, residue or `"x, y, z"`; add
+     `--frame "A/1 N1, A/1 N2, A/1 N3"` for heights above that plane. Use this to probe without adding stops.
+
+   Options: `--map NAME` lists only that map; `--peaks N` sets the whole-map lists and `--stop-peaks N` the
+   per-stop lists (default 8). A label in another residue also gets its `h`, which tells which side of the
+   frame plane that residue lies on.
 
    Every statement in a stop text should come from these numbers.
 3. **Build**: `moorlight share spec.json -o page.html`. The command prints the size. An artifact page must stay at
@@ -107,7 +122,8 @@ Nothing runs on the cluster after the page is written.
   - `orient`: `face` (default; the frame atoms' plane faces the viewer, longest axis horizontal), `edge` (that
     plane seen edge-on, its normal pointing up, which shows out-of-plane motion), `keep` (the previous stop's
     rotation) or a quaternion `[x, y, z, w]`. `frame` lists the atoms that define the plane; the default is the
-    centre's atoms. Fewer than three atoms keep the rotation.
+    centre's atoms. A lone atom (a metal) uses itself and the atoms within 2.6 Å (its coordination). Otherwise
+    fewer than three atoms keep the rotation.
   - `maps`: `{map name: level}` shows that map at that level, `false` hides it. Maps not named go back to their
     defaults from `maps`, so every stop looks the same however the viewer got there.
   - `labels`: atom specs to label. `distances`: pairs of atom specs.
@@ -122,6 +138,15 @@ Nothing runs on the cluster after the page is written.
 - Without an altloc, an atom spec takes the first conformer; `--at` lists every conformer.
 - An unknown atom gives an error that lists the atoms of that residue. An unknown copy lists the copies drawn.
 - On the command line, `--at -/102` and `--near -/102` work as written.
+
+## The page
+
+- **Theme:** one deliberate dark look (Coot black) in every theme.
+- **Layout:**
+  - On an upright phone the panel sits under the view.
+  - On a phone turned sideways, and on wide screens, the panel sits beside the view.
+  - The button at the top right of the view (or F) shows the view alone, with a small floating ◀ ▶ bar for the
+    stops. The page remembers that choice.
 
 ## Writing the tour
 
