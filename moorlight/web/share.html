@@ -221,6 +221,7 @@ kbd { font: 0.8rem var(--font-data); }
     </div>
     <div id="mini-nav" class="fab" role="group" aria-label="Structure">
       <button id="mini-atoms" type="button" aria-pressed="true" title="Show or hide the structure (A)">Atoms</button>
+      <button id="mini-front" type="button" aria-pressed="true" title="Hide residues in front of the one at the centre (C)">Hide in front</button>
     </div>
   </div>
   <section id="panel" aria-label="Viewer controls">
@@ -280,6 +281,7 @@ kbd { font: 0.8rem var(--font-data); }
       <ul id="mol-list"></ul>
       <div class="view-row">
         <button id="hyd" type="button" aria-pressed="false">Hydrogens</button>
+        <button id="front" type="button" aria-pressed="true" title="Hide residues in front of the one at the centre (C)">Hide in front</button>
         <button id="clear" type="button">Clear labels</button>
         <button id="reset" type="button">Reset view</button>
       </div>
@@ -291,7 +293,8 @@ kbd { font: 0.8rem var(--font-data); }
         structure from front to back. Its window is the layer you see: drag it to look deeper or less deep, drag its ends to
         make the layer thinner or thicker, tap the bar to jump. The molecule keeps turning about the same point (the white
         dot on the bar); double-tap an atom to make it the rotation centre. Tap an atom for its label and the map values there;
-        double-tap to centre on it. Sliders set each map's contour level. On a trackpad, two-finger scrolling changes the level of the first visible
+        double-tap to centre on it. Residues in front of the one at the centre that cover it are hidden, with their
+        density; residues bonded to it stay. Hide in front (<kbd>C</kbd>) turns this off. Sliders set each map's contour level. On a trackpad, two-finger scrolling changes the level of the first visible
         map, two-finger click and drag pans, pinching zooms. With a mouse, the wheel changes the level, right-drag or Shift-drag pans and
         Ctrl+wheel zooms. <kbd>F</kbd> shows the view alone, <kbd>,</kbd> <kbd>.</kbd> move in depth and
         <kbd>[</kbd> <kbd>]</kbd> change the slab, <kbd>A</kbd> hides the structure, <kbd>L</kbd> fixes the

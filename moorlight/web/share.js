@@ -19,7 +19,7 @@ const CONTOUR = { pos: 0x00d000, neg: 0xe00000, map: 0x3d7fff };
 const WATERS = ["HOH", "WAT", "DOD"];
 
 const S = {
-  mols: [],            // {data, group, xyz, hideH}
+  mols: [],            // {data, group, xyz, hideH, res (residue id per atom), hidden (per atom, Hide in front)}
   maps: [],            // {info, values: Float32Array, visible, level, obj, drawn, vol}
   center: new THREE.Vector3(),
   zoom: 30, slab: 9,
@@ -101,6 +101,7 @@ function render() {
   if (!needsRender) return;
   needsRender = false;
   updateCamera();
+  updateClear();
   sliceFrame();
   renderer.render(scene, camera);
   updateDepthBar();
@@ -145,23 +146,55 @@ function buildMolecule(k) {
   const lone = [];
   for (let i = 0; i < d.atoms.length; i++) if (!bonded[i] && !(mol.hideH && isH(i))) lone.push(i);
   if (d.style === "lines") {
-    const pos = [], col = [];
+    const pos = [], col = [], seg = [];
     for (const b of keep) {
       const i = d.bonds[2*b], j = d.bonds[2*b+1], x = mol.xyz;
       const mx = (x[3*i] + x[3*j]) / 2, my = (x[3*i+1] + x[3*j+1]) / 2, mz = (x[3*i+2] + x[3*j+2]) / 2;
       pos.push(x[3*i], x[3*i+1], x[3*i+2], mx, my, mz, mx, my, mz, x[3*j], x[3*j+1], x[3*j+2]);
       _c.setHex(elColor(d.element[i], k)); col.push(_c.r, _c.g, _c.b, _c.r, _c.g, _c.b);
       _c.setHex(elColor(d.element[j], k)); col.push(_c.r, _c.g, _c.b, _c.r, _c.g, _c.b);
+      seg.push(i, j);
     }
     if (pos.length) {
       const g = new LineSegmentsGeometry(); g.setPositions(pos); g.setColors(col);
-      mol.group.add(new LineSegments2(g, lineMat(2.5, { vertexColors: true })));
+      const ls = new LineSegments2(g, lineMat(2.5, { vertexColors: true }));
+      ls.userData.lines = { pos: Float32Array.from(pos), col: Float32Array.from(col), atom: Int32Array.from(seg), shown: seg.length };
+      mol.group.add(ls);
     }
     lone.length && mol.group.add(...stickMeshes(mol, k, [], lone));
   } else {
     mol.group.add(...stickMeshes(mol, k, keep, lone));
   }
+  applyHidden(k);
   redraw();
+}
+// residues hidden by Hide in front: their sticks and balls shrink to nothing, their lines are left out
+function applyHidden(k) {
+  const mol = S.mols[k], hid = mol.hidden;
+  for (const ch of mol.group.children) {
+    const u = ch.userData;
+    if (u.m0) {
+      const arr = ch.instanceMatrix.array;
+      for (let n = 0; n < u.atom.length; n++) {
+        const o = 16 * n;
+        if (hid[u.atom[n]]) arr.fill(0, o, o + 12);
+        else arr.set(u.m0.subarray(o, o + 12), o);
+      }
+      ch.instanceMatrix.needsUpdate = true;
+    } else if (u.lines) {
+      const { pos, col, atom } = u.lines;
+      const keep = [];
+      for (let s = 0; s < atom.length; s++) if (!hid[atom[s]]) keep.push(s);
+      if (keep.length === atom.length && u.lines.shown === atom.length) continue;
+      const p = new Float32Array(6 * keep.length), q = new Float32Array(6 * keep.length);
+      keep.forEach((s, n) => { p.set(pos.subarray(6*s, 6*s + 6), 6*n); q.set(col.subarray(6*s, 6*s + 6), 6*n); });
+      ch.geometry.dispose();
+      ch.geometry = new LineSegmentsGeometry();
+      if (keep.length) { ch.geometry.setPositions(p); ch.geometry.setColors(q); }
+      ch.visible = keep.length > 0;
+      u.lines.shown = keep.length;
+    }
+  }
 }
 
 function stickMeshes(mol, k, keep, lone) {
@@ -182,7 +215,7 @@ function stickMeshes(mol, k, keep, lone) {
     const pi = P(i), pj = P(j), mid = pi.clone().add(pj).multiplyScalar(0.5);
     const r = isH(i) || isH(j) ? H_STICK_R : STICK_R;
     const ci = elColor(d.element[i], k), cj = elColor(d.element[j], k);
-    cyl.push([pi, mid, r, ci], [mid, pj, r, cj]);
+    cyl.push([pi, mid, r, ci, i], [mid, pj, r, cj, j]);
     const order = d.orders ? d.orders[b] : 1;
     if (order === 2 || order === 3 || order === 4) {
       // second line offset towards a neighbour (inside of rings), shortened at both ends, like Coot
@@ -199,11 +232,11 @@ function stickMeshes(mol, k, keep, lone) {
       off.normalize().multiplyScalar(0.27);
       const a = pi.clone().lerp(pj, 0.15).add(off), bb = pj.clone().lerp(pi, 0.15).add(off);
       const m2 = a.clone().add(bb).multiplyScalar(0.5);
-      cyl.push([a, m2, r * 0.6, ci], [m2, bb, r * 0.6, cj]);
+      cyl.push([a, m2, r * 0.6, ci, i], [m2, bb, r * 0.6, cj, j]);
       if (order === 3) {
         const a3 = pi.clone().lerp(pj, 0.15).sub(off), b3 = pj.clone().lerp(pi, 0.15).sub(off);
         const m3 = a3.clone().add(b3).multiplyScalar(0.5);
-        cyl.push([a3, m3, r * 0.6, ci], [m3, b3, r * 0.6, cj]);
+        cyl.push([a3, m3, r * 0.6, ci, i], [m3, b3, r * 0.6, cj, j]);
       }
     }
   }
@@ -219,6 +252,7 @@ function stickMeshes(mol, k, keep, lone) {
       im.setColorAt(n, _c.setHex(col));
     });
     im.frustumCulled = false;
+    keepInstances(im, cyl.map((c) => c[4]));
     out.push(im);
   }
   const loneSet = new Set(lone);
@@ -235,9 +269,15 @@ function stickMeshes(mol, k, keep, lone) {
       im.setColorAt(n, _c.setHex(elColor(d.element[i], k)));
     });
     im.frustumCulled = false;
+    keepInstances(im, balls);
     out.push(im);
   }
   return out;
+}
+// the atom behind each instance and the instance's own matrix, so applyHidden can hide and restore it
+function keepInstances(im, atoms) {
+  im.userData.atom = Int32Array.from(atoms);
+  im.userData.m0 = im.instanceMatrix.array.slice();
 }
 
 function atomLabel(k, i) {
@@ -266,7 +306,7 @@ function pick(clientX, clientY, maxPx) {
     if (!mol.group.visible) return;
     const el = mol.data.element;
     for (let i = 0; i < mol.data.atoms.length; i++) {
-      if (mol.hideH && el[i] === "H") continue;
+      if ((mol.hideH && el[i] === "H") || mol.hidden[i]) continue;
       v.set(mol.xyz[3*i], mol.xyz[3*i+1], mol.xyz[3*i+2]).applyMatrix4(world.matrixWorld).project(camera);
       if (v.z < -1 || v.z > 1) continue;
       const sx = (v.x + 1) / 2 * rect.width, sy = (1 - v.y) / 2 * rect.height;
@@ -314,7 +354,7 @@ function updateLabels() {
     const [k, i] = key.split(":").map(Number);
     const x = S.mols[k].xyz;
     v.set(x[3*i], x[3*i+1], x[3*i+2]).applyMatrix4(world.matrixWorld).project(camera);
-    div.style.display = v.z > -1 && v.z < 1 && S.mols[k].group.visible ? "" : "none";
+    div.style.display = v.z > -1 && v.z < 1 && S.mols[k].group.visible && !S.mols[k].hidden[i] ? "" : "none";
     div.style.left = `${(v.x + 1) / 2 * rect.width}px`;
     div.style.top = `${(1 - v.y) / 2 * rect.height}px`;
   }
@@ -464,28 +504,61 @@ function contourCenter() { return S.center.clone().addScaledVector(viewAxis(), S
 function contourMap(m) {
   const cc = contourCenter();
   const c = cc.toArray();
-  clearMapObj(m);
   const surface = S.style === "surface";
   m.style = S.style === "slice" ? "mesh" : S.style;
+  m.raw = [];
   for (const sign of m.info.kind === "diff" ? [1, -1] : [1]) {
-    const k = sign > 0 ? 0 : 1;
-    const mc = marchingCubes(m, c, S.radius, m.level, sign, !surface);
-    if (surface) {
-      if (!mc.index.length) continue;
-      const g = new THREE.BufferGeometry();
-      g.setAttribute("position", new THREE.BufferAttribute(mc.verts, 3));
-      g.setIndex(new THREE.BufferAttribute(mc.index, 1));
-      g.computeVertexNormals();
-      m.obj.add(new THREE.Mesh(g, m.smats[k] || (m.smats[k] = surfaceMat(mapColor(m, sign)))));
-    } else {
-      if (!mc.segments.length) continue;
-      const g = new LineSegmentsGeometry();
-      g.setPositions(mc.segments);
-      m.obj.add(new LineSegments2(g, m.mats[k] || (m.mats[k] = lineMat(1.1, { color: mapColor(m, sign) }))));
-    }
+    m.raw.push({ sign, surface, mc: marchingCubes(m, c, S.radius, m.level, sign, !surface), own: null });
   }
   m.drawn = { center: cc, level: m.level, style: m.style, radius: S.radius };
+  drawMap(m);
+}
+// the contour, less the density of residues hidden by Hide in front
+function drawMap(m) {
+  clearMapObj(m);
+  m.stale = false;
+  const hide = CLEAR.hidden;
+  for (const r of m.raw || []) {
+    const k = r.sign > 0 ? 0 : 1, mc = r.mc;
+    if (hide.size && !r.own) r.own = contourOwners(r);
+    if (r.surface) {
+      const index = hide.size ? mc.index.filter((_, t) => !hide.has(r.own[(t / 3) | 0])) : mc.index;
+      if (!index.length) continue;
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(mc.verts, 3));
+      g.setIndex(new THREE.BufferAttribute(index, 1));
+      g.computeVertexNormals();
+      m.obj.add(new THREE.Mesh(g, m.smats[k] || (m.smats[k] = surfaceMat(mapColor(m, r.sign)))));
+    } else {
+      let seg = mc.segments;
+      if (hide.size) {
+        const out = new Float32Array(seg.length);
+        let w = 0;
+        for (let s = 0; s < r.own.length; s++) if (!hide.has(r.own[s])) { out.set(seg.subarray(6*s, 6*s + 6), w); w += 6; }
+        seg = out.slice(0, w);
+      }
+      if (!seg.length) continue;
+      const g = new LineSegmentsGeometry();
+      g.setPositions(seg);
+      m.obj.add(new LineSegments2(g, m.mats[k] || (m.mats[k] = lineMat(1.1, { color: mapColor(m, r.sign) }))));
+    }
+  }
   redraw();
+}
+// the residue each triangle (surface) or line (mesh) belongs to, by its middle
+function contourOwners(r) {
+  const mc = r.mc;
+  if (r.surface) {
+    const v = mc.verts, ix = mc.index, own = new Int32Array(ix.length / 3);
+    for (let t = 0; t < own.length; t++) {
+      const a = 3 * ix[3*t], b = 3 * ix[3*t+1], c = 3 * ix[3*t+2];
+      own[t] = ownerAt((v[a] + v[b] + v[c]) / 3, (v[a+1] + v[b+1] + v[c+1]) / 3, (v[a+2] + v[b+2] + v[c+2]) / 3);
+    }
+    return own;
+  }
+  const s = mc.segments, own = new Int32Array(s.length / 6);
+  for (let n = 0; n < own.length; n++) own[n] = ownerAt((s[6*n] + s[6*n+3]) / 2, (s[6*n+1] + s[6*n+4]) / 2, (s[6*n+2] + s[6*n+5]) / 2);
+  return own;
 }
 let contourTimer = null;
 function scheduleContour(now = false) {
@@ -497,7 +570,10 @@ function scheduleContour(now = false) {
       if (!m.visible || m === sliced) continue;
       const d = m.drawn;
       const want = S.style === "slice" ? "mesh" : S.style;
-      if (d && d.center.distanceTo(contourCenter()) < 0.5 && d.level === m.level && d.style === want && d.radius === S.radius) continue;
+      if (d && d.center.distanceTo(contourCenter()) < 0.5 && d.level === m.level && d.style === want && d.radius === S.radius) {
+        if (m.stale) drawMap(m);
+        continue;
+      }
       contourMap(m);
     }
     updateSlice();
@@ -668,7 +744,7 @@ function sliceFrame() {
     if (!mol.group.visible) continue;
     const x = mol.xyz, el = mol.data.element;
     for (let i = 0; i < el.length; i++) {
-      if (el[i] === "H") continue;
+      if (el[i] === "H" || mol.hidden[i]) continue;
       const dx = x[3*i] - _p0.x, dy = x[3*i+1] - _p0.y, dz = x[3*i+2] - _p0.z;
       if (Math.abs(dx * _n.x + dy * _n.y + dz * _n.z) > half) continue;
       if (Math.abs(dx * _ex.x + dy * _ex.y + dz * _ex.z) > r || Math.abs(dx * _ey.x + dy * _ey.y + dz * _ey.z) > r) continue;
@@ -724,12 +800,13 @@ function loadPresetPlanes() {
 }
 // turn the view onto a saved plane: centred on it, facing it
 function goToPlane(i) {
-  const pl = S.planes[i];
+  const pl = S.planes[i], lvl = pl.level;
   pl.visible = true;
+  if (lvl != null) setLevel(pl.map, lvl);    // the map takes the plane's level, so the plane, contours and slider agree
   renderPlaneList();
   S.depth = 0;
   animateTo(pl.p0.clone(), new THREE.Quaternion().setFromRotationMatrix(pl.Rt.clone().transpose()));
-  status(`${pl.name}${pl.level != null ? `, contoured at ${pl.level}` : ""}`);
+  status(`${pl.name}${lvl != null ? `, contoured at ${fmtLevel(pl.map)}` : ""}`);
 }
 // a parallel copy of a plane, moved along its normal by the copy offset; it belongs to the viewer
 function copyPlane(i) {
@@ -1001,7 +1078,9 @@ function updateLevels(source = null) {
 }
 function setLevel(m, v, source = null) {
   m.level = Math.max(0.1, +v.toFixed(2));
-  if (SLICE.map === m && SLICE.mesh) { SLICE.mesh.material.uniforms.uLevel.value = m.level; redraw(); }
+  for (const pl of S.planes) if (pl.map === m) pl.level = null;   // planes follow their map's level once it is changed
+  if (SLICE.map === m && SLICE.mesh) SLICE.mesh.material.uniforms.uLevel.value = m.level;
+  redraw();
   if (!m.visible) m.visible = true;
   updateLevels(source);
   status(`${m.info.name}: contour at ${fmtLevel(m)}`);
@@ -1087,6 +1166,144 @@ function setMolVisible(k, on) {
   const cb = $(`#mol-vis-${k}`);
   if (cb) cb.checked = on;
   updateAtomsButton();
+  CLEAR.focus = null;                 // contacts and density owners change with the visible molecules
+  for (const m of S.maps) if (m.raw) { m.raw.forEach((r) => { r.own = null; }); m.stale = true; }
+  scheduleContour();
+  redraw();
+}
+
+// ------------------------------------------------------------ hide in front
+// Residues in front of the one at the centre that cover it on screen are hidden, with the map density around
+// them, so nothing stands between you and the centre. Residues bonded to it or within CONTACT of it stay (a metal
+// keeps its ligands). Map density belongs to the residue of the nearest atom within OWN_R.
+const CLEAR = { on: true, hidden: new Set(), focus: null, keep: new Set() };
+const BLOCK_R = 1.5, POINT_R = 2.0, FOCUS_R = 2.5, CONTACT = 2.6, OWN_R = 2.2;
+let NRES = 0;
+function indexResidues(mol) {
+  const ids = new Map(), a = mol.data.atoms;
+  mol.res = new Int32Array(a.length);
+  for (let i = 0; i < a.length; i++) {
+    const key = `${a[i][0]}|${a[i][1]}|${a[i][2]}|${a[i][9] || ""}`;   // neighbour copies are residues of their own
+    if (!ids.has(key)) ids.set(key, NRES++);
+    mol.res[i] = ids.get(key);
+  }
+}
+const OWN = new Map();
+const ownCell = (v) => Math.floor(v / OWN_R) + 1024;
+function indexOwners() {
+  S.mols.forEach((mol, k) => {
+    const x = mol.xyz, el = mol.data.element;
+    for (let i = 0; i < el.length; i++) {
+      if (el[i] === "H") continue;
+      const key = (ownCell(x[3*i]) * 2048 + ownCell(x[3*i+1])) * 2048 + ownCell(x[3*i+2]);
+      (OWN.get(key) || OWN.set(key, []).get(key)).push(k, i);
+    }
+  });
+}
+function ownerAt(px, py, pz) {
+  const cx = ownCell(px), cy = ownCell(py), cz = ownCell(pz);
+  let best = -1, bd = OWN_R * OWN_R;
+  for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) {
+    const list = OWN.get(((cx + a) * 2048 + cy + b) * 2048 + cz + c);
+    if (!list) continue;
+    for (let t = 0; t < list.length; t += 2) {
+      const mol = S.mols[list[t]];
+      if (!mol.group.visible) continue;
+      const i = list[t + 1], x = mol.xyz;
+      const d = (x[3*i] - px) ** 2 + (x[3*i+1] - py) ** 2 + (x[3*i+2] - pz) ** 2;
+      if (d < bd) { bd = d; best = mol.res[i]; }
+    }
+  }
+  return best;
+}
+function contacts(fk, focus, pts) {
+  const keep = new Set();
+  if (fk < 0) return keep;
+  const d = S.mols[fk].data, res = S.mols[fk].res;
+  for (let b = 0; b < d.bonds.length; b += 2) {
+    const ri = res[d.bonds[b]], rj = res[d.bonds[b + 1]];
+    if (ri === focus) keep.add(rj);
+    if (rj === focus) keep.add(ri);
+  }
+  const C2 = CONTACT * CONTACT;
+  for (const mol of S.mols) {
+    if (!mol.group.visible) continue;
+    const x = mol.xyz, el = mol.data.element;
+    for (let i = 0; i < el.length; i++) {
+      if (el[i] === "H" || keep.has(mol.res[i])) continue;
+      for (let p = 0; p < pts.length; p += 3) {
+        if ((x[3*i] - pts[p]) ** 2 + (x[3*i+1] - pts[p+1]) ** 2 + (x[3*i+2] - pts[p+2]) ** 2 < C2) { keep.add(mol.res[i]); break; }
+      }
+    }
+  }
+  keep.delete(focus);
+  return keep;
+}
+const _E = new THREE.Matrix4();
+function updateClear() {
+  const hidden = new Set();
+  if (CLEAR.on) {
+    const f = contourCenter(), c = S.center;
+    // the residue at the centre: that of the nearest atom within FOCUS_R; with none, the centre point itself
+    let fk = -1, fi = -1, bd = FOCUS_R * FOCUS_R;
+    S.mols.forEach((mol, k) => {
+      if (!mol.group.visible) return;
+      const x = mol.xyz, el = mol.data.element;
+      for (let i = 0; i < el.length; i++) {
+        if (el[i] === "H") continue;
+        const d = (x[3*i] - f.x) ** 2 + (x[3*i+1] - f.y) ** 2 + (x[3*i+2] - f.z) ** 2;
+        if (d < bd) { bd = d; fk = k; fi = i; }
+      }
+    });
+    const focus = fk < 0 ? -1 : S.mols[fk].res[fi];
+    const pts = [];
+    if (fk < 0) pts.push(f.x, f.y, f.z);
+    else {
+      const mol = S.mols[fk], x = mol.xyz;
+      for (let i = 0; i < mol.res.length; i++) if (mol.res[i] === focus && mol.data.element[i] !== "H") pts.push(x[3*i], x[3*i+1], x[3*i+2]);
+    }
+    if (focus !== CLEAR.focus) { CLEAR.focus = focus; CLEAR.keep = contacts(fk, focus, pts); }
+    // in view coordinates (x right, y up, z towards you, Å from the rotation centre)
+    const e = _E.makeRotationFromQuaternion(rot.quaternion).elements;
+    const fp = [];
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (let p = 0; p < pts.length; p += 3) {
+      const dx = pts[p] - c.x, dy = pts[p+1] - c.y, dz = pts[p+2] - c.z;
+      const vx = e[0]*dx + e[4]*dy + e[8]*dz, vy = e[1]*dx + e[5]*dy + e[9]*dz;
+      fp.push(vx, vy, e[2]*dx + e[6]*dy + e[10]*dz);
+      x0 = Math.min(x0, vx); x1 = Math.max(x1, vx); y0 = Math.min(y0, vy); y1 = Math.max(y1, vy);
+    }
+    const R = fk < 0 ? POINT_R : BLOCK_R, R2 = R * R, front = S.depth + S.slab;
+    for (const mol of S.mols) {
+      if (!mol.group.visible) continue;
+      const x = mol.xyz, el = mol.data.element, res = mol.res;
+      for (let i = 0; i < el.length; i++) {
+        const r = res[i];
+        if (r === focus || el[i] === "H" || hidden.has(r) || CLEAR.keep.has(r)) continue;
+        const dx = x[3*i] - c.x, dy = x[3*i+1] - c.y, dz = x[3*i+2] - c.z;
+        const vx = e[0]*dx + e[4]*dy + e[8]*dz;
+        if (vx < x0 - R || vx > x1 + R) continue;
+        const vy = e[1]*dx + e[5]*dy + e[9]*dz;
+        if (vy < y0 - R || vy > y1 + R) continue;
+        const vz = e[2]*dx + e[6]*dy + e[10]*dz;
+        if (vz > front) continue;          // cut off by the slab anyway
+        for (let p = 0; p < fp.length; p += 3) {
+          if (vz > fp[p+2] + 0.3 && (vx - fp[p]) ** 2 + (vy - fp[p+1]) ** 2 < R2) { hidden.add(r); break; }
+        }
+      }
+    }
+  }
+  if (hidden.size === CLEAR.hidden.size && [...hidden].every((r) => CLEAR.hidden.has(r))) return;
+  CLEAR.hidden = hidden;
+  S.mols.forEach((mol, k) => {
+    for (let i = 0; i < mol.res.length; i++) mol.hidden[i] = hidden.has(mol.res[i]) ? 1 : 0;
+    applyHidden(k);
+  });
+  for (const m of S.maps) if (m.raw) { if (m.obj.visible) drawMap(m); else m.stale = true; }
+}
+function setClear(on) {
+  CLEAR.on = on;
+  for (const b of [$("#front"), $("#mini-front")]) b.setAttribute("aria-pressed", String(on));
   redraw();
 }
 function updateAtomsButton() {
@@ -1193,6 +1410,7 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "f" || e.key === "F") setFull(!$("#app").classList.contains("full"));
   else if ((e.key === "l" || e.key === "L") && S.style === "slice") setSliceLock(!SLICE.lock);
   else if (e.key === "a" || e.key === "A") toggleStructure();
+  else if (e.key === "c" || e.key === "C") setClear(!CLEAR.on);
   else if (e.key === "," || e.key === ".") moveDepth(e.key === "." ? 0.5 : -0.5);
   else if (e.key === "[" || e.key === "]") setSlab(S.slab * (e.key === "]" ? 1.2 : 1 / 1.2));
   else if ((e.key === "s" || e.key === "S") && S.style === "slice") savePlane();
@@ -1219,6 +1437,7 @@ $("#copy-offset").addEventListener("input", (e) => {
 for (const b of [$("#slice-save"), $("#mini-save")]) b.addEventListener("click", savePlane);
 $("#slice-atoms").addEventListener("click", planeThroughLabels);
 $("#mini-atoms").addEventListener("click", toggleStructure);
+for (const b of [$("#front"), $("#mini-front")]) b.addEventListener("click", () => setClear(!CLEAR.on));
 $("#reset").addEventListener("click", applyView);
 $("#clear").addEventListener("click", () => { clearLabels(); status(""); });
 // ---------------------------------------------------------------- depth bar
@@ -1333,11 +1552,14 @@ try { if (localStorage.getItem("moorlight-share-full") === "1") setFull(true); }
 // ------------------------------------------------------------------- start
 async function start() {
   DATA.models.forEach((d, k) => {
-    const mol = { data: d, group: new THREE.Group(), xyz: Float32Array.from(d.xyz), hideH: !d.hydrogens };
+    const mol = { data: d, group: new THREE.Group(), xyz: Float32Array.from(d.xyz), hideH: !d.hydrogens,
+      hidden: new Uint8Array(d.atoms.length) };
+    indexResidues(mol);
     world.add(mol.group);
     S.mols.push(mol);
     buildMolecule(k);
   });
+  indexOwners();
   $("#hyd").setAttribute("aria-pressed", String(S.mols.some((m) => !m.hideH)));
   resize();
   render();
