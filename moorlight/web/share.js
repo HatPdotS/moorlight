@@ -5,6 +5,7 @@ import * as THREE from "three";
 import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
+import { edgeTable, triTable } from "three/addons/objects/MarchingCubes.js";
 
 const $ = (s) => document.querySelector(s);
 const DATA = JSON.parse($("#ml-data").textContent);
@@ -19,13 +20,14 @@ const WATERS = ["HOH", "WAT", "DOD"];
 
 const S = {
   mols: [],            // {data, group, xyz, hideH}
-  maps: [],            // {info, values: Float32Array, visible, level, obj, lastCenter, lastLevel}
+  maps: [],            // {info, values: Float32Array, visible, level, obj, drawn, vol}
   center: new THREE.Vector3(),
   zoom: 30, slab: 9,
   stop: -1,
   labels: new Map(),   // "mol:idx" -> div
   distances: [],
   radius: DATA.contour_radius || 10,
+  style: "mesh",       // mesh | surface | volume
 };
 
 // ------------------------------------------------------------------ three
@@ -91,7 +93,8 @@ function render() {
   if (!needsRender) return;
   needsRender = false;
   updateCamera();
-  renderer.render(scene, camera);
+  if (S.style === "volume") renderWithVolumes();
+  else renderer.render(scene, camera);
   updateLabels();
 }
 const redraw = () => (needsRender = true);
@@ -352,20 +355,20 @@ function valueAt(m, p) {
   return toLevelUnits(m, s);
 }
 
-// Surface nets: one vertex per grid cell the contour passes through (mean of its edge crossings), joined to the
-// vertices of face-neighbours whose shared face the contour crosses. Drawn as lines this is Coot-like chicken wire.
-const CORNERS = [...Array(8).keys()].map((c) => [c & 1, (c >> 1) & 1, (c >> 2) & 1]);
-const CUBE_EDGES = [];
-for (let a = 0; a < 8; a++) for (const bit of [1, 2, 4]) if (!(a & bit)) CUBE_EDGES.push([a, a | bit]);
-const FACE = [0xaa, 0xcc, 0xf0];   // corners on the +x, +y, +z face of a cell
+// Marching cubes (three.js tables): vertices where the contour crosses grid edges, shared between neighbouring
+// cells. Mesh style draws the triangle edges (Coot's chicken wire), surface style the shaded triangles.
+const MC_CORNER = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]];
+const MC_EDGE = [[0, 0, 0, 0], [1, 0, 0, 1], [0, 1, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0], [1, 0, 1, 1],
+  [0, 1, 1, 0], [0, 0, 1, 1], [0, 0, 0, 2], [1, 0, 0, 2], [1, 1, 0, 2], [0, 1, 0, 2]];   // start point, axis
+const MCX = MC_CORNER.map((q) => q[0]), MCY = MC_CORNER.map((q) => q[1]), MCZ = MC_CORNER.map((q) => q[2]);
 
-function surfaceNet(m, c, r, level, sign) {
+function marchingCubes(m, c, r, level, sign, wire) {
   const { n, origin: o, G, Ginv, wrap } = m.info;
   const D = m.values;
   const off = m.info.units === "sigma" ? m.info.mean : 0, scale = m.info.units === "sigma" ? m.info.rms : 1;
   const L = level * scale;
-  // grid cells covering the cube c +/- r (a parallelepiped on a non-orthogonal grid); vertices outside the cube are
-  // dropped below, so the contour fills a box around the centre as in Coot
+  // grid cells covering the cube c +/- r (a parallelepiped on a non-orthogonal grid); triangles leaving the cube
+  // are dropped, so the contour fills a box around the centre as in Coot
   const ci = mat3(Ginv, [c[0] - o[0], c[1] - o[1], c[2] - o[2]]);
   const lo = [], hi = [];
   for (let a = 0; a < 3; a++) {
@@ -375,7 +378,8 @@ function surfaceNet(m, c, r, level, sign) {
     lo.push(l); hi.push(h);
   }
   const sx = hi[0] - lo[0], sy = hi[1] - lo[1], sz = hi[2] - lo[2];
-  if (sx <= 0 || sy <= 0 || sz <= 0) return new Float32Array(0);
+  const empty = { verts: new Float32Array(0), index: new Uint32Array(0), segments: new Float32Array(0) };
+  if (sx <= 0 || sy <= 0 || sz <= 0) return empty;
   // offset in the value array of each grid plane along each axis (wrapped on the periodic cell grid)
   const stride = [n[1] * n[2], n[2], 1];
   const [X, Y, Z] = [0, 1, 2].map((a) => {
@@ -383,73 +387,84 @@ function surfaceNet(m, c, r, level, sign) {
     for (let q = 0; q < t.length; q++) t[q] = (wrap ? wrapIndex(lo[a] + q, n[a]) : lo[a] + q) * stride[a];
     return t;
   });
-  const CX = CORNERS.map((q) => q[0]), CY = CORNERS.map((q) => q[1]), CZ = CORNERS.map((q) => q[2]);
-  const vid = new Int32Array(sx * sy * sz).fill(-1);
-  const masks = new Uint8Array(sx * sy * sz);
-  const verts = [];
-  const val = new Float64Array(8);
-  for (let a = 0; a < sx; a++) for (let b = 0; b < sy; b++) {
-    let cell = (a * sy + b) * sz;
-    for (let d = 0; d < sz; d++, cell++) {
-      let mask = 0;
-      for (let q = 0; q < 8; q++) {
-        const v = sign * (D[X[a + CX[q]] + Y[b + CY[q]] + Z[d + CZ[q]]] - off);
-        val[q] = v;
-        if (v > L) mask |= 1 << q;
-      }
-      if (mask === 0 || mask === 255) continue;
-      let ax = 0, ay = 0, az = 0, cnt = 0;
-      for (const [p, q] of CUBE_EDGES) {
-        if (((mask >> p) & 1) === ((mask >> q) & 1)) continue;
-        const t = (L - val[p]) / (val[q] - val[p]);
-        ax += CX[p] + t * (CX[q] - CX[p]); ay += CY[p] + t * (CY[q] - CY[p]); az += CZ[p] + t * (CZ[q] - CZ[p]);
-        cnt++;
-      }
-      const fi = lo[0] + a + ax / cnt, fj = lo[1] + b + ay / cnt, fk = lo[2] + d + az / cnt;
-      const px = o[0] + G[0]*fi + G[1]*fj + G[2]*fk;
-      const py = o[1] + G[3]*fi + G[4]*fj + G[5]*fk;
-      const pz = o[2] + G[6]*fi + G[7]*fj + G[8]*fk;
-      if (Math.abs(px - c[0]) > r || Math.abs(py - c[1]) > r || Math.abs(pz - c[2]) > r) continue;
-      vid[cell] = verts.length / 3;
-      masks[cell] = mask;
-      verts.push(px, py, pz);
-    }
+  const py = sy + 1, pz = sz + 1;
+  const edgeVert = new Int32Array((sx + 1) * py * pz * 3).fill(-1);
+  const verts = [], inBox = [], tris = [];
+  const val = (a, b, d) => sign * (D[X[a] + Y[b] + Z[d]] - off);
+  function edgeVertex(a, b, d, axis) {
+    const key = ((a * py + b) * pz + d) * 3 + axis;
+    let v = edgeVert[key];
+    if (v >= 0) return v;
+    const v0 = val(a, b, d);
+    const v1 = axis === 0 ? val(a + 1, b, d) : axis === 1 ? val(a, b + 1, d) : val(a, b, d + 1);
+    const t = (L - v0) / (v1 - v0);
+    const fi = lo[0] + a + (axis === 0 ? t : 0), fj = lo[1] + b + (axis === 1 ? t : 0), fk = lo[2] + d + (axis === 2 ? t : 0);
+    const x = o[0] + G[0]*fi + G[1]*fj + G[2]*fk, y = o[1] + G[3]*fi + G[4]*fj + G[5]*fk, z = o[2] + G[6]*fi + G[7]*fj + G[8]*fk;
+    v = verts.length / 3;
+    verts.push(x, y, z);
+    inBox.push(Math.abs(x - c[0]) <= r && Math.abs(y - c[1]) <= r && Math.abs(z - c[2]) <= r);
+    edgeVert[key] = v;
+    return v;
   }
-  const seg = [];
-  const strides = [sy * sz, sz, 1], lim = [sx, sy, sz];
+  const ev = new Int32Array(12);
   for (let a = 0; a < sx; a++) for (let b = 0; b < sy; b++) for (let d = 0; d < sz; d++) {
-    const cell = (a * sy + b) * sz + d;
-    const v = vid[cell];
-    if (v < 0) continue;
-    const idx = [a, b, d];
-    for (let ax = 0; ax < 3; ax++) {
-      if (idx[ax] + 1 >= lim[ax]) continue;
-      const fm = masks[cell] & FACE[ax];
-      if (fm === 0 || fm === FACE[ax]) continue;
-      const w = vid[cell + strides[ax]];
-      if (w < 0) continue;
-      seg.push(verts[3*v], verts[3*v+1], verts[3*v+2], verts[3*w], verts[3*w+1], verts[3*w+2]);
+    let cube = 0;
+    for (let q = 0; q < 8; q++) if (val(a + MCX[q], b + MCY[q], d + MCZ[q]) < L) cube |= 1 << q;
+    const bits = edgeTable[cube];
+    if (!bits) continue;
+    for (let e = 0; e < 12; e++) {
+      if (bits & (1 << e)) { const E = MC_EDGE[e]; ev[e] = edgeVertex(a + E[0], b + E[1], d + E[2], E[3]); }
+    }
+    for (let t = cube * 16; triTable[t] !== -1; t += 3) {
+      const i = ev[triTable[t]], j = ev[triTable[t + 1]], k = ev[triTable[t + 2]];
+      if (inBox[i] && inBox[j] && inBox[k]) tris.push(i, j, k);
     }
   }
-  return new Float32Array(seg);
+  const out = { verts: new Float32Array(verts), index: new Uint32Array(tris), segments: new Float32Array(0) };
+  if (wire) {   // each triangle edge once
+    const seen = new Set(), seg = [];
+    const add = (i, j) => {
+      const key = i < j ? i * 67108864 + j : j * 67108864 + i;
+      if (seen.has(key)) return;
+      seen.add(key);
+      seg.push(verts[3*i], verts[3*i+1], verts[3*i+2], verts[3*j], verts[3*j+1], verts[3*j+2]);
+    };
+    for (let t = 0; t < tris.length; t += 3) { add(tris[t], tris[t+1]); add(tris[t+1], tris[t+2]); add(tris[t+2], tris[t]); }
+    out.segments = new Float32Array(seg);
+  }
+  return out;
 }
 
+const mapColor = (m, sign) => (m.info.kind === "diff" ? (sign > 0 ? CONTOUR.pos : CONTOUR.neg) : (m.info.color || CONTOUR.map));
+function surfaceMat(color) {
+  return new THREE.MeshPhongMaterial({ color, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false,
+    shininess: 40, specular: 0x333333 });
+}
 function clearMapObj(m) {
   for (const ch of [...m.obj.children]) { m.obj.remove(ch); ch.geometry.dispose(); }
 }
 function contourMap(m) {
   const c = S.center.toArray();
   clearMapObj(m);
-  const signs = m.info.kind === "diff" ? [1, -1] : [1];
-  for (const sign of signs) {
-    const seg = surfaceNet(m, c, S.radius, m.level, sign);
-    if (!seg.length) continue;
-    const g = new LineSegmentsGeometry();
-    g.setPositions(seg);
-    const color = m.info.kind === "diff" ? (sign > 0 ? CONTOUR.pos : CONTOUR.neg) : (m.info.color || CONTOUR.map);
-    m.obj.add(new LineSegments2(g, m.mats[sign > 0 ? 0 : 1] || (m.mats[sign > 0 ? 0 : 1] = lineMat(1.1, { color }))));
+  const surface = S.style === "surface";
+  for (const sign of m.info.kind === "diff" ? [1, -1] : [1]) {
+    const k = sign > 0 ? 0 : 1;
+    const mc = marchingCubes(m, c, S.radius, m.level, sign, !surface);
+    if (surface) {
+      if (!mc.index.length) continue;
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(mc.verts, 3));
+      g.setIndex(new THREE.BufferAttribute(mc.index, 1));
+      g.computeVertexNormals();
+      m.obj.add(new THREE.Mesh(g, m.smats[k] || (m.smats[k] = surfaceMat(mapColor(m, sign)))));
+    } else {
+      if (!mc.segments.length) continue;
+      const g = new LineSegmentsGeometry();
+      g.setPositions(mc.segments);
+      m.obj.add(new LineSegments2(g, m.mats[k] || (m.mats[k] = lineMat(1.1, { color: mapColor(m, sign) }))));
+    }
   }
-  m.lastCenter = S.center.clone(); m.lastLevel = m.level;
+  m.drawn = { center: S.center.clone(), level: m.level, style: S.style, radius: S.radius };
   redraw();
 }
 let contourTimer = null;
@@ -457,13 +472,165 @@ function scheduleContour(now = false) {
   clearTimeout(contourTimer);
   contourTimer = setTimeout(() => {
     for (const m of S.maps) {
-      m.obj.visible = m.visible;
+      const vol = S.style === "volume";
+      m.obj.visible = m.visible && !vol;
+      if (m.vol) m.vol.visible = m.visible && vol;
       if (!m.visible) continue;
-      if (m.lastCenter && m.lastCenter.distanceTo(S.center) < 0.5 && m.lastLevel === m.level) continue;
+      if (vol) { placeVolume(m); continue; }
+      const d = m.drawn;
+      if (d && d.center.distanceTo(S.center) < 0.5 && d.level === m.level && d.style === S.style && d.radius === S.radius) continue;
       contourMap(m);
     }
     redraw();
   }, now ? 0 : 120);
+}
+
+// ------------------------------------------------------------------- volume
+// Ray marching through the map inside the contour box. Samples beyond about 0.7 x level add green (+) or red (-)
+// light, more opaque the stronger they are; rays stop at the slab and at the molecules (depth from a first pass).
+const VOL = { rt: null, failed: false };
+const VOL_VS = `
+varying vec3 vLocal;
+void main() {
+  vLocal = position;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+const VOL_FS = `
+precision highp float;
+precision highp sampler3D;
+#include <packing>
+uniform sampler3D uMap;
+uniform sampler2D uDepth;
+uniform mat3 uGinv;
+uniform vec3 uOrigin, uCenter, uN, uCamLocal, uCamDir, uPos, uNeg;
+uniform vec2 uRes;
+uniform float uR, uLevel, uStep, uDensity, uNear, uFar, uFogNear, uFogFar, uCamNear, uCamFar;
+uniform int uSigned;
+varying vec3 vLocal;
+void main() {
+  vec3 d = normalize(vLocal - uCamLocal);
+  vec3 inv = 1.0 / d;
+  vec3 ta = (vec3(-uR) - uCamLocal) * inv, tb = (vec3(uR) - uCamLocal) * inv;
+  vec3 tmin = min(ta, tb), tmax = max(ta, tb);
+  float cosA = max(dot(d, uCamDir), 1e-3);
+  float t0 = max(max(max(tmin.x, tmin.y), tmin.z), uNear / cosA);
+  float t1 = min(min(min(tmax.x, tmax.y), tmax.z), uFar / cosA);
+  float depth = texture2D(uDepth, gl_FragCoord.xy / uRes).r;
+  if (depth < 1.0) t1 = min(t1, -perspectiveDepthToViewZ(depth, uCamNear, uCamFar) / cosA);
+  if (t1 <= t0) discard;
+  float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+  vec4 acc = vec4(0.0);
+  for (int s = 0; s < 512; s++) {
+    float t = t0 + (float(s) + jitter) * uStep;
+    if (t > t1 || acc.a > 0.97) break;
+    vec3 idx = uGinv * (uCenter + uCamLocal + d * t - uOrigin);
+    float v = texture(uMap, (idx.zyx + 0.5) / uN.zyx).r;
+    if (uSigned == 0 && v < 0.0) continue;
+    float f = clamp((abs(v) - 0.7 * uLevel) / (1.3 * uLevel), 0.0, 1.0);
+    if (f <= 0.0) continue;
+    float alpha = 1.0 - exp(-uDensity * f * f * uStep);
+    float fog = 1.0 - smoothstep(uFogNear, uFogFar, t * cosA);
+    vec3 col = (v >= 0.0 ? uPos : uNeg) * (0.55 + 0.45 * f) * fog;
+    acc.rgb += (1.0 - acc.a) * alpha * col;
+    acc.a += (1.0 - acc.a) * alpha;
+  }
+  gl_FragColor = acc;
+}`;
+
+function volumeTexture(m) {
+  if (m.tex) return m.tex;
+  const [n0, n1, n2] = m.info.n;
+  const half = new Uint16Array(m.values.length);
+  for (let q = 0; q < half.length; q++) half[q] = THREE.DataUtils.toHalfFloat(toLevelUnits(m, m.values[q]));
+  const tex = new THREE.Data3DTexture(half, n2, n1, n0);   // x = third grid axis (fastest), z = first
+  tex.format = THREE.RedFormat;
+  tex.type = THREE.HalfFloatType;
+  tex.minFilter = tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = tex.wrapT = tex.wrapR = m.info.wrap ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+  tex.unpackAlignment = 1;
+  tex.needsUpdate = true;
+  return (m.tex = tex);
+}
+function placeVolume(m) {
+  const r = S.radius;
+  if (!m.vol) {
+    const G = m.info.G;
+    const spacing = Math.min(...[0, 1, 2].map((a) => Math.hypot(G[a], G[3 + a], G[6 + a])));
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: VOL_VS, fragmentShader: VOL_FS, side: THREE.BackSide, transparent: true, premultipliedAlpha: true,
+      depthTest: false, depthWrite: false,
+      uniforms: {
+        uMap: { value: volumeTexture(m) }, uDepth: { value: null }, uGinv: { value: new THREE.Matrix3().set(...m.info.Ginv) },
+        uOrigin: { value: new THREE.Vector3(...m.info.origin) }, uCenter: { value: new THREE.Vector3() },
+        uN: { value: new THREE.Vector3(...m.info.n) }, uCamLocal: { value: new THREE.Vector3() },
+        uCamDir: { value: new THREE.Vector3() }, uPos: { value: new THREE.Color(mapColor(m, 1)) },
+        uNeg: { value: new THREE.Color(mapColor(m, -1)) }, uRes: { value: new THREE.Vector2() },
+        uR: { value: r }, uLevel: { value: m.level }, uStep: { value: spacing * 0.5 }, uDensity: { value: 4.0 },
+        uNear: { value: 1 }, uFar: { value: 100 }, uFogNear: { value: 1 }, uFogFar: { value: 100 },
+        uCamNear: { value: 1 }, uCamFar: { value: 100 }, uSigned: { value: m.info.kind === "diff" ? 1 : 0 },
+      },
+    });
+    m.vol = new THREE.Mesh(new THREE.BoxGeometry(2 * r, 2 * r, 2 * r), mat);
+    m.vol.renderOrder = 10;
+    m.vol.frustumCulled = false;
+    m.vol.userData.r = r;
+    world.add(m.vol);
+  }
+  if (m.vol.userData.r !== r) {
+    m.vol.geometry.dispose();
+    m.vol.geometry = new THREE.BoxGeometry(2 * r, 2 * r, 2 * r);
+    m.vol.userData.r = r;
+  }
+  m.vol.position.copy(S.center);
+  const u = m.vol.material.uniforms;
+  u.uCenter.value.copy(S.center);
+  u.uR.value = r;
+  u.uLevel.value = m.level;    // the texture holds values in level units
+  m.vol.visible = m.visible;
+}
+// Volume style renders twice: the molecules into a depth texture, then everything with the volumes on top.
+function renderWithVolumes() {
+  const vols = S.maps.filter((m) => m.vol && m.vol.visible).map((m) => m.vol);
+  if (!vols.length) { renderer.render(scene, camera); return; }
+  const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+  if (!VOL.rt || VOL.rt.width !== size.x || VOL.rt.height !== size.y) {
+    if (VOL.rt) VOL.rt.dispose();
+    VOL.rt = new THREE.WebGLRenderTarget(size.x, size.y, { depthBuffer: true });
+    VOL.rt.depthTexture = new THREE.DepthTexture(size.x, size.y);
+  }
+  for (const v of vols) v.visible = false;
+  renderer.setRenderTarget(VOL.rt);
+  renderer.render(scene, camera);
+  renderer.setRenderTarget(null);
+  scene.updateMatrixWorld();
+  const q = new THREE.Quaternion();
+  for (const v of vols) {
+    v.visible = true;
+    const u = v.material.uniforms;
+    u.uDepth.value = VOL.rt.depthTexture;
+    u.uRes.value.copy(size);
+    u.uCamLocal.value.copy(v.worldToLocal(camera.position.clone()));
+    v.getWorldQuaternion(q);
+    u.uCamDir.value.set(0, 0, -1).applyQuaternion(q.invert());
+    u.uNear.value = camera.near; u.uFar.value = camera.far;
+    u.uCamNear.value = camera.near; u.uCamFar.value = camera.far;
+    u.uFogNear.value = scene.fog.near; u.uFogFar.value = scene.fog.far;
+  }
+  renderer.render(scene, camera);
+}
+renderer.debug.onShaderError = (gl, program, vs, fs) => {
+  VOL.failed = true;
+  console.error("shader error", gl.getProgramInfoLog(program), gl.getShaderInfoLog(fs));
+  status("Volume rendering is not available in this browser; back to mesh.");
+  setTimeout(() => setStyle("mesh"), 0);
+};
+
+function setStyle(style) {
+  if (style === "volume" && VOL.failed) style = "mesh";
+  S.style = style;
+  document.querySelectorAll("#style-row button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.style === style)));
+  try { localStorage.setItem("moorlight-share-style", style); } catch (err) { /* storage blocked */ }
+  scheduleContour(true);
 }
 
 function renderMapList() {
@@ -475,33 +642,79 @@ function renderMapList() {
     const sw = m.info.kind === "diff"
       ? `<span class="sw" aria-hidden="true"><i style="background:var(--pos)"></i><i style="background:var(--neg)"></i></span>`
       : `<span class="sw" aria-hidden="true"><i style="background:var(--map)"></i></span>`;
-    li.innerHTML = `<input type="checkbox" id="map-vis-${k}"><label for="map-vis-${k}">${sw}<span class="name"></span></label>` +
-      `<div class="lvl"><button type="button" aria-label="Lower contour level">&minus;</button><output></output>` +
-      `<button type="button" aria-label="Raise contour level">+</button></div>`;
+    li.innerHTML = `<div class="map-head"><input type="checkbox" id="map-vis-${k}"><label for="map-vis-${k}">${sw}` +
+      `<span class="name"></span></label></div>` +
+      `<div class="lvl"><button type="button" aria-label="Lower contour level">&minus;</button>` +
+      `<input type="range" id="map-lvl-${k}" min="0" max="1000" step="1">` +
+      `<button type="button" aria-label="Raise contour level">+</button><output for="map-lvl-${k}"></output></div>`;
     li.querySelector(".name").textContent = m.info.name;
-    const cb = li.querySelector("input");
+    const cb = li.querySelector("input[type=checkbox]");
     cb.checked = m.visible;
-    cb.addEventListener("change", () => { m.visible = cb.checked; scheduleContour(true); });
+    cb.addEventListener("change", () => { m.visible = cb.checked; updateLevels(); scheduleContour(true); });
     const [down, up] = li.querySelectorAll("button");
     down.addEventListener("click", () => changeLevel(m, -levelStep(m)));
     up.addEventListener("click", () => changeLevel(m, levelStep(m)));
+    const range = li.querySelector("input[type=range]");
+    range.setAttribute("aria-label", `Contour level of ${m.info.name}`);
+    bindSlider(range, () => m);
+    m.range = range;
     m.out = li.querySelector("output");
     ul.appendChild(li);
   });
+  bindSlider($("#mini-level-range"), activeMap);
   updateLevels();
 }
 const levelStep = (m) => (m.info.kind === "diff" ? 0.5 : 0.25);
-function updateLevels() {
-  for (const m of S.maps) if (m.out) m.out.textContent = `${m.kind === "diff" ? "±" : ""}${m.level.toFixed(1)}${unit(m)}`;
+const fmtLevel = (m, v = m.level) => `${m.kind === "diff" ? "±" : ""}${v < 10 ? v.toFixed(1) : v.toFixed(0)}${unit(m)}`;
+const activeMap = () => S.maps.find((x) => x.visible) || null;
+
+// Sliders run on a log scale from lo (1 for difference maps, 0.3 otherwise) to the map's largest value, so the
+// usual 3-6 level range gets most of the travel and the strongest peaks are still in reach.
+function levelRange(m) {
+  const lo = m.info.kind === "diff" ? 1 : 0.3;
+  return [lo, Math.max(lo * 4, m.maxAbs || lo * 20)];
+}
+function levelToPos(m, v) {
+  const [lo, hi] = levelRange(m);
+  return Math.round(1000 * Math.log(Math.min(hi, Math.max(lo, v)) / lo) / Math.log(hi / lo));
+}
+function posToLevel(m, p) {
+  const [lo, hi] = levelRange(m);
+  const v = lo * Math.pow(hi / lo, p / 1000);
+  return v < 10 ? Math.round(v * 10) / 10 : Math.round(v);
+}
+function bindSlider(range, getMap) {
+  range.addEventListener("input", () => {
+    const m = getMap();
+    if (!m) return;
+    setLevel(m, posToLevel(m, +range.value), range);
+  });
+  range.addEventListener("change", () => scheduleContour(true));
+}
+function updateLevels(source = null) {
+  for (const m of S.maps) {
+    if (m.out) m.out.textContent = fmtLevel(m);
+    if (m.range && m.range !== source) m.range.value = String(levelToPos(m, m.level));
+  }
   S.maps.forEach((m, k) => { const cb = $(`#map-vis-${k}`); if (cb) cb.checked = m.visible; });
+  const a = activeMap(), box = $("#mini-level");
+  box.classList.toggle("none", !a);
+  if (a) {
+    $("#mini-level-name").textContent = a.info.name;
+    $("#mini-level-out").textContent = fmtLevel(a);
+    const r = $("#mini-level-range");
+    r.setAttribute("aria-label", `Contour level of ${a.info.name}`);
+    if (r !== source) r.value = String(levelToPos(a, a.level));
+  }
 }
-function changeLevel(m, step) {
-  m.level = Math.max(0.1, +(m.level + step).toFixed(2));
+function setLevel(m, v, source = null) {
+  m.level = Math.max(0.1, +v.toFixed(2));
   if (!m.visible) m.visible = true;
-  updateLevels();
-  status(`${m.info.name}: contour at ${m.info.kind === "diff" ? "±" : ""}${m.level.toFixed(2)}${unit(m)}`);
-  scheduleContour(true);
+  updateLevels(source);
+  status(`${m.info.name}: contour at ${fmtLevel(m)}`);
+  scheduleContour(!source);    // while a slider moves, recontour after a short pause
 }
+function changeLevel(m, step) { setLevel(m, m.level + step); }
 
 // ------------------------------------------------------------ view and stops
 let anim = null;
@@ -545,7 +758,7 @@ function applyStop(k) {
   for (const [mk, i] of s.labels || []) if (S.mols[mk - 1]) toggleLabel(mk - 1, i);
   for (const [a, b] of s.distances || []) addDistance([a[0] - 1, a[1]], [b[0] - 1, b[1]]);
   S.radius = s.contour_radius || DATA.contour_radius || 10;
-  for (const m of S.maps) m.lastCenter = null;
+  for (const m of S.maps) m.drawn = null;
   S.zoom = fitZoom(s.radius || 10);
   S.slab = s.slab || s.radius || 10;
   const q = s.orient ? new THREE.Quaternion(...s.orient) : null;
@@ -669,6 +882,12 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "f" || e.key === "F") setFull(!$("#app").classList.contains("full"));
 });
 
+document.querySelectorAll("#style-row button").forEach((b) => b.addEventListener("click", () => setStyle(b.dataset.style)));
+try {
+  const st = localStorage.getItem("moorlight-share-style");
+  if (st === "surface" || st === "volume") S.style = st;
+} catch (err) { /* storage blocked */ }
+document.querySelectorAll("#style-row button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.style === S.style)));
 $("#prev").addEventListener("click", () => applyStop(S.stop - 1));
 $("#next").addEventListener("click", () => applyStop(S.stop + 1));
 $("#reset").addEventListener("click", () => applyStop(S.stop));
@@ -714,7 +933,10 @@ async function start() {
   } else {
     for (const info of DATA.maps) {
       const m = { info, values: await decodeMap(info), visible: info.visible, level: info.level, kind: info.kind,
-        obj: new THREE.Group(), mats: [], lastCenter: null, lastLevel: null };
+        obj: new THREE.Group(), mats: [], smats: [], drawn: null, vol: null, tex: null };
+      let mx = 0;
+      for (const v of m.values) { const a = Math.abs(toLevelUnits(m, v)); if (a > mx) mx = a; }
+      m.maxAbs = mx;
       world.add(m.obj);
       S.maps.push(m);
     }

@@ -83,8 +83,15 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 
 #app.full { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "view"; }
 #app.full header, #app.full #panel { display: none; }
+#mini-level { position: absolute; z-index: 2; left: 50%; transform: translateX(-50%);
+  bottom: calc(58px + env(safe-area-inset-bottom, 0px)); display: none; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: 8px; width: min(440px, calc(100% - 24px)); padding: 2px 10px; border-radius: 10px; }
+#mini-level span { max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 0.8rem var(--font-data);
+  color: var(--muted); }
 #app.full #mini-nav { display: flex; }
-#app.full #status { bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
+#app.full #mini-level { display: grid; }
+#app.full #mini-level.none { display: none; }
+#app.full #status { bottom: calc(108px + env(safe-area-inset-bottom, 0px)); }
 .stop-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .eyebrow { font: 500 0.72rem var(--font-data); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
 h2 { margin: 0; font-size: 1.05rem; font-weight: 600; line-height: 1.25; text-wrap: balance; }
@@ -94,15 +101,18 @@ h2 { margin: 0; font-size: 1.05rem; font-weight: 600; line-height: 1.25; text-wr
 h3 { margin: 0 0 6px; font: 500 0.72rem var(--font-data); letter-spacing: 0.08em; text-transform: uppercase;
   color: var(--muted); }
 #map-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.map { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; }
-.map input { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
+.map { display: flex; flex-direction: column; gap: 2px; }
+.map-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.map input[type=checkbox] { flex: none; width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
 .map label { min-width: 0; display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .map .name { min-width: 0; overflow-wrap: anywhere; line-height: 1.25; }
 .sw { flex: none; display: inline-flex; gap: 2px; }
 .sw i { display: block; width: 8px; height: 14px; border-radius: 2px; }
-.lvl { display: flex; align-items: center; gap: 4px; }
-.lvl output { min-width: 4.6em; text-align: center; font: 0.85rem var(--font-data); font-variant-numeric: tabular-nums; }
+.lvl { display: grid; grid-template-columns: auto minmax(0, 1fr) auto 5.2em; align-items: center; gap: 6px; }
+.lvl output, #mini-level output { text-align: right; font: 0.85rem var(--font-data); font-variant-numeric: tabular-nums; }
+input[type=range] { width: 100%; min-width: 0; height: 32px; margin: 0; accent-color: var(--accent); touch-action: pan-y; }
 .view-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 .help { margin: 0; color: var(--muted); font-size: 0.82rem; max-width: 65ch; }
 kbd { font: 0.8rem var(--font-data); }
 
@@ -140,6 +150,11 @@ kbd { font: 0.8rem var(--font-data); }
     <div id="loading">Unpacking maps…</div>
     <button id="fullscreen" class="fab" type="button" aria-pressed="false" aria-label="Full screen view"
       title="Full screen view (F)"></button>
+    <div id="mini-level" class="fab" role="group" aria-label="Contour level">
+      <span id="mini-level-name"></span>
+      <input type="range" id="mini-level-range" min="0" max="1000" step="1">
+      <output id="mini-level-out" for="mini-level-range"></output>
+    </div>
     <div id="mini-nav" class="fab" role="group" aria-label="Tour stops">
       <button id="mini-prev" type="button" aria-label="Previous stop">&#9664;</button>
       <span id="mini-pos"></span>
@@ -159,6 +174,14 @@ kbd { font: 0.8rem var(--font-data); }
       <ul id="map-list"></ul>
     </div>
     <div>
+      <h3>Maps drawn as</h3>
+      <div class="view-row seg" id="style-row" role="group" aria-label="Map style">
+        <button type="button" data-style="mesh" aria-pressed="true">Mesh</button>
+        <button type="button" data-style="surface" aria-pressed="false">Surface</button>
+        <button type="button" data-style="volume" aria-pressed="false">Volume</button>
+      </div>
+    </div>
+    <div>
       <h3>View</h3>
       <div class="view-row">
         <button id="slab-down" type="button">Slab &minus;</button>
@@ -168,8 +191,8 @@ kbd { font: 0.8rem var(--font-data); }
         <button id="reset" type="button">Back to stop view</button>
       </div>
     </div>
-    <p class="help">Drag to rotate, pinch to zoom, move two fingers to pan. Tap an atom for its label and the
-      map values there; double-tap to centre on it. With a mouse: right-drag zooms, Ctrl-drag pans, the wheel changes
+    <p class="help">Drag to rotate, pinch to zoom, move two fingers to pan. Drag a slider to set a map's contour
+      level. Tap an atom for its label and the map values there; double-tap to centre on it. With a mouse: right-drag zooms, Ctrl-drag pans, the wheel changes
       the level of the first visible map, <kbd>&larr;</kbd> <kbd>&rarr;</kbd> step through the stops. The button at the
       top right of the view (or <kbd>F</kbd>) shows the view alone; tap it again for the menus.</p>
   </section>
