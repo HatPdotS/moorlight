@@ -96,6 +96,7 @@ function render() {
   updateCamera();
   sliceFrame();
   renderer.render(scene, camera);
+  updateDepthBar();
   updateLabels();
 }
 const redraw = () => (needsRender = true);
@@ -1162,6 +1163,8 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "f" || e.key === "F") setFull(!$("#app").classList.contains("full"));
   else if ((e.key === "l" || e.key === "L") && S.style === "slice") setSliceLock(!SLICE.lock);
   else if (e.key === "a" || e.key === "A") toggleStructure();
+  else if (e.key === "," || e.key === ".") moveDepth(e.key === "." ? 0.5 : -0.5);
+  else if (e.key === "[" || e.key === "]") setSlab(S.slab * (e.key === "]" ? 1.2 : 1 / 1.2));
   else if ((e.key === "s" || e.key === "S") && S.style === "slice") savePlane();
 });
 
@@ -1188,8 +1191,91 @@ $("#slice-atoms").addEventListener("click", planeThroughLabels);
 $("#mini-atoms").addEventListener("click", toggleStructure);
 $("#reset").addEventListener("click", applyView);
 $("#clear").addEventListener("click", () => { clearLabels(); status(""); });
-$("#slab-down").addEventListener("click", () => { S.slab = Math.max(1, S.slab / 1.3); syncDepthRange(); redraw(); });
-$("#slab-up").addEventListener("click", () => { S.slab = Math.min(200, S.slab * 1.3); syncDepthRange(); redraw(); });
+// ---------------------------------------------------------------- depth bar
+// A scrollbar for depth on the right of the view: the bar is the structure from front (top) to back (bottom),
+// the window on it is the visible slab around the focus. Dragging the window moves the focus into or out of the
+// screen; dragging its ends changes the slab; tapping the bar jumps there. The yellow tick is the live slice.
+const DB = { front: 10, back: -10, drag: null };
+const _zrow = new THREE.Matrix4();
+function depthExtent() {
+  _zrow.makeRotationFromQuaternion(rot.quaternion);
+  const e = _zrow.elements, zx = e[2], zy = e[6], zz = e[10];
+  let lo = Infinity, hi = -Infinity;
+  const c = S.center;
+  for (const mol of S.mols) {
+    if (!mol.group.visible) continue;
+    const x = mol.xyz, el = mol.data.element;
+    for (let i = 0; i < el.length; i++) {
+      if (el[i] === "H") continue;
+      const z = zx * (x[3*i] - c.x) + zy * (x[3*i+1] - c.y) + zz * (x[3*i+2] - c.z);
+      if (z < lo) lo = z;
+      if (z > hi) hi = z;
+    }
+  }
+  if (!Number.isFinite(lo)) { lo = -S.slab; hi = S.slab; }
+  DB.front = Math.max(hi, S.slab) + 1;    // z towards the viewer, relative to the focus
+  DB.back = Math.min(lo, -S.slab) - 1;
+}
+const depthToFrac = (z) => (DB.front - z) / (DB.front - DB.back);
+function updateDepthBar() {
+  depthExtent();
+  const bar = $("#depthbar"), H = bar.clientHeight;
+  const top = depthToFrac(S.slab), bot = depthToFrac(-S.slab);
+  const win = $("#depth-window");
+  win.style.top = `${top * H}px`;
+  win.style.height = `${Math.max(14, (bot - top) * H)}px`;
+  const tick = $("#depth-plane");
+  const live = S.style === "slice" && !SLICE.off && SLICE.mesh && SLICE.mesh.visible && !SLICE.lock && !SLICE.tiltX && !SLICE.tiltY;
+  tick.hidden = !live;
+  if (live) tick.style.top = `${depthToFrac(SLICE.depth) * H}px`;
+  bar.setAttribute("aria-valuetext", `slab ±${S.slab.toFixed(1)} Å`);
+}
+function moveDepth(dz) {        // dz > 0: the focus goes into the screen
+  _zrow.makeRotationFromQuaternion(rot.quaternion);
+  const e = _zrow.elements;
+  S.center.addScaledVector(new THREE.Vector3(e[2], e[6], e[10]), -dz);
+  redraw(); scheduleContour();
+}
+function setSlab(v) {
+  S.slab = Math.max(0.8, Math.min(200, v));
+  syncDepthRange(); redraw();
+}
+{
+  const bar = $("#depthbar");
+  const zAt = (clientY) => {
+    const r = bar.getBoundingClientRect();
+    const f = Math.min(1, Math.max(0, (clientY - r.top) / r.height));
+    return DB.front - f * (DB.front - DB.back);
+  };
+  bar.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try { bar.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    const t = e.target.closest ? e.target : null;
+    const grip = t && t.classList && t.classList.contains("grip");
+    const inWin = t && t.closest && t.closest("#depth-window");
+    if (grip) DB.drag = { mode: "slab" };
+    else {
+      if (!inWin) moveDepth(-zAt(e.clientY));      // tap on the bar: jump there
+      DB.drag = { mode: "move", y: e.clientY };
+    }
+    bar.classList.add("active");
+  });
+  bar.addEventListener("pointermove", (e) => {
+    if (!DB.drag) return;
+    if (DB.drag.mode === "slab") {
+      setSlab(Math.abs(zAt(e.clientY)));
+    } else {
+      const dy = e.clientY - DB.drag.y;
+      DB.drag.y = e.clientY;
+      moveDepth(dy * (DB.front - DB.back) / bar.clientHeight);
+    }
+    updateDepthBar();
+  });
+  const end = () => { DB.drag = null; bar.classList.remove("active"); scheduleContour(true); redraw(); };
+  bar.addEventListener("pointerup", end);
+  bar.addEventListener("pointercancel", end);
+}
 function syncDepthRange() {
   for (const el of [$("#slice-depth"), $("#mini-depth-range")]) { el.min = String(-S.slab); el.max = String(S.slab); }
   setSliceDepth(SLICE.depth);

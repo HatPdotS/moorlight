@@ -130,6 +130,23 @@ details[hidden] { display: none; }
 .mol label { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; }
 .mol .chip { flex: none; width: 14px; height: 14px; border-radius: 50%; }
 #mini-atoms[aria-pressed="false"] { color: var(--muted); }
+#depthbar { position: absolute; z-index: 2; right: max(6px, env(safe-area-inset-right, 0px)); top: 60px;
+  height: min(46%, 340px); width: 34px; touch-action: none; cursor: ns-resize; }
+#depthbar .rail { position: absolute; left: 15px; top: 0; bottom: 0; width: 4px; border-radius: 2px;
+  background: rgba(154, 164, 175, 0.35); }
+#depth-window { position: absolute; left: 3px; right: 3px; border: 1.5px solid var(--accent); border-radius: 6px;
+  background: rgba(230, 194, 41, 0.16); cursor: grab; }
+#depthbar.active #depth-window { background: rgba(230, 194, 41, 0.3); }
+#depth-window .grip { position: absolute; left: -3px; right: -3px; height: 14px; cursor: ns-resize; }
+#depth-window .grip.top { top: -8px; }
+#depth-window .grip.bottom { bottom: -8px; }
+#depth-window .grip::after { content: ""; position: absolute; left: 8px; right: 8px; top: 6px; height: 2px;
+  border-radius: 1px; background: var(--accent); }
+#depth-plane { position: absolute; left: 0; right: 0; height: 0; border-top: 2px solid var(--accent); }
+#depthbar .end { position: absolute; left: 50%; transform: translate(-50%, -110%); top: 0; font: 9px var(--font-data);
+  color: var(--muted); letter-spacing: 0.04em; pointer-events: none; }
+#depthbar .end.back { top: auto; bottom: 0; transform: translate(-50%, 110%); }
+#status { right: 48px !important; }
 #plane-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .plane { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto auto; align-items: center; gap: 6px; }
 .plane button:not(.go) { padding: 0 8px; }
@@ -177,6 +194,13 @@ kbd { font: 0.8rem var(--font-data); }
     <div id="labels"></div>
     <div id="status" aria-live="polite"></div>
     <div id="loading">Unpacking maps…</div>
+    <div id="depthbar" role="group" aria-label="Depth: drag the window to move through the structure, its ends to change the slab">
+      <span class="end">front</span>
+      <div class="rail"></div>
+      <div id="depth-window"><div class="grip top"></div><div class="grip bottom"></div></div>
+      <div id="depth-plane" hidden></div>
+      <span class="end back">back</span>
+    </div>
     <button id="fullscreen" class="fab" type="button" aria-pressed="false" aria-label="Full screen view"
       title="Full screen view (F)"></button>
     <div id="mini-level" class="fab" role="group" aria-label="Contour level">
@@ -254,16 +278,17 @@ kbd { font: 0.8rem var(--font-data); }
       <div class="view-row">
         <button id="hyd" type="button" aria-pressed="false">Hydrogens</button>
         <button id="clear" type="button">Clear labels</button>
-        <button id="slab-down" type="button">Slab &minus;</button>
-        <button id="slab-up" type="button">Slab +</button>
         <button id="reset" type="button">Reset view</button>
       </div>
     </div>
     <details class="help">
       <summary>Controls</summary>
-      <p>Drag to rotate, pinch to zoom, move two fingers to pan. Tap an atom for its label and the map values there;
+      <p>Drag to rotate, pinch to zoom, move two fingers to pan. The bar at the right edge of the view is the
+        structure from front to back: drag its window to move through the structure, drag the window's ends to make the
+        visible slab thinner or thicker, tap the bar to jump. Tap an atom for its label and the map values there;
         double-tap to centre on it. Sliders set each map's contour level. With a mouse: right-drag zooms, Ctrl-drag
-        pans, the wheel changes the level of the first visible map, <kbd>F</kbd> shows the view alone, <kbd>A</kbd> hides the structure, <kbd>L</kbd> fixes the
+        pans, the wheel changes the level of the first visible map, <kbd>F</kbd> shows the view alone, <kbd>,</kbd> <kbd>.</kbd> move in depth and
+        <kbd>[</kbd> <kbd>]</kbd> change the slab, <kbd>A</kbd> hides the structure, <kbd>L</kbd> fixes the
         slice, <kbd>S</kbd> saves it. The slice faces you and turns with the molecule until you fix it; tilt it with the two angle sliders,
         or label three or more atoms and put it through them. A thick slice shows the strongest value within the
         thickness, so features just off the plane appear as well. Live plane off hides the moving plane and leaves the saved ones. Save plane keeps a plane in place (with its

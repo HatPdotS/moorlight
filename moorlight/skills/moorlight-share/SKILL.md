@@ -147,8 +147,12 @@ It is a viewer, not a presentation: there are no stops or texts.
   - Copy adds a parallel plane at the copy offset (slider, −5 to +5 Å).
   - Edit makes it the live plane; × removes it.
   - The viewer's own planes and copies are kept in their browser. Presets come with the page.
-- **Structure:** a checkbox for each model and for the neighbouring cells, plus hydrogens, clear labels, slab and
-  Reset view.
+- **Structure:** a checkbox for each model and for the neighbouring cells, plus hydrogens, clear labels and Reset
+  view.
+- **Depth bar** (right edge of the view): the structure from front (top) to back.
+  - Its window is the visible slab around the focus. Drag the window to move the focus into or out of the screen.
+  - Drag the window's ends to change the slab; tap the bar to jump.
+  - The yellow tick is the live slice. Keys: `,` `.` move, `[` `]` change the slab.
 - **Full screen** (button or F): level and depth sliders, Fix plane, Save, and an Atoms toggle (A).
 - **Theme:** one deliberate dark look (Coot black).
 - **Layout:** on an upright phone the panel sits under the view, otherwise beside it.
