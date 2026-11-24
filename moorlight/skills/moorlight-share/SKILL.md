@@ -1,57 +1,60 @@
 ---
 name: moorlight-share
-description: Make a self-contained, phone-friendly Moorlight page (models + maps + a short tour) that needs no server, for sending as a file or publishing as a claude.ai artifact. Use when the user wants to look at a structure and its maps from a phone, a Remote Control session or a link, or to share a guided view of a result.
+description: Make a self-contained, phone-friendly Moorlight viewer page (models + maps + preset slice planes) that needs no server, for sending as a file or publishing as a claude.ai artifact. Use when the user wants to look at a structure and its maps from a phone, a Remote Control session or a link, or asks for preset planes through a structure.
 ---
 
-# Shareable Moorlight snapshots
+# Shareable Moorlight viewer pages
 
 `moorlight share` turns a small JSON spec into one HTML page holding:
 - the models, plus the atoms of neighbouring cells and symmetry copies around them;
 - the maps;
-- a list of tour stops.
+- a starting view;
+- preset slice planes.
 
-The browser contours the maps itself, with chicken wire as in Coot. On the page you can:
-- rotate, pinch-zoom and pan;
-- switch maps and change their contour levels;
-- tap an atom to get its label and the map values there;
-- step through the stops.
+The browser draws everything itself:
+- contours as marching-cubes mesh (Coot's chicken wire) or as shaded surfaces;
+- Olex2-style map slices.
 
-Nothing runs on the cluster after the page is written.
+On the page you can:
+- rotate, zoom and pan;
+- switch maps and set their levels with sliders;
+- tap atoms for labels and map values;
+- hide the structure;
+- move, tilt, thicken, fix, save and copy slice planes.
+
+It is a viewer, not a presentation: there are no stops or texts.
 
 ## Workflow
 
-0. **Fast start**: `moorlight share init MODEL "MAP=name" ["MAP2=name" ...] -o spec.json [--title "Cage 3.5 ps"]
-   [--units absolute --unit-label SD] [--level 4] [--min 10] [--stops 5] [--build page.html]`.
+1. **Fast start**: `moorlight share init MODEL "MAP=name" ["MAP2=name" ...] -o spec.json [--title "Cage 3.5 ps"]
+   [--units absolute --unit-label SD] [--level 4] [--min 10] [--planes 5] [--build page.html]`.
    - Takes about 10 s and writes `spec.json` plus `spec.check.txt` (the full `--check` output).
-   - The spec holds an overview and one stop per group of strong features of the first map: peaks beyond `--min`
-     (default 2.5 × level) within 1.5 Å of an atom.
-   - Residues with more than five heavy atoms get a stop each (guests and ligands, shown first, planar ones
-     edge-on). Smaller residues (metals, waters, counter-ions) are grouped by name and shown at the strongest one.
-   - Each stop has its view, level and labels, and a draft text that states the numbers.
-   - Usually you only reword the texts, add what the user's notes say about reliability, drop or reorder stops, and
-     build. `--build` gives a page right away; the drafts are factual and fine for a first look.
-1. **Write or edit the spec** (`spec.json`, format below). Paths are relative to the spec file.
-2. **Get the numbers**: `moorlight share spec.json --check [--at SPEC ...] [--near SPEC --radius R ...]`.
+   - The spec holds a starting view of the whole structure and one preset plane per group of strong features of
+     the first map (peaks beyond `--min`, default 2.5 × level, within 1.5 Å of an atom):
+     - a large residue gets a plane through its atoms around the strongest feature;
+     - a metal gets the plane of its coordination;
+     - waters and other small residues are grouped by name.
+2. **Edit the spec** (format below). When the user asks for a plane ("a plane through the azo N and the ring
+   carbons", "perpendicular to that, through Pd1", "a stack 1 Å apart"), add it to `planes`, check it, build, and
+   republish to the same artifact.
+3. **Check**: `moorlight share spec.json --check [--at SPEC ...] [--near SPEC --radius R [--frame "A, B, C"]]`.
    It prints:
-   - for each map, its strongest peaks of each sign, each listed once next to the model, with the nearest atom;
-   - for each stop:
-     - the values of every map at its labels;
-     - the peaks of every difference map within its radius, with coordinates, the nearest drawn atom and the
-       height above the frame plane (`h`);
-   - for `--at`, the values at atoms or residues;
-   - for `--near`, the atoms and the peaks around an atom, residue or `"x, y, z"`; add
-     `--frame "A/1 N1, A/1 N2, A/1 N3"` for heights above that plane. Use this to probe without adding stops.
+   - each map's strongest peaks of each sign, each listed once next to the model, with the nearest atom;
+   - for each plane:
+     - its centre and normal;
+     - how flat its atoms are (rms);
+     - the atoms within the slice, with their heights `h`;
+     - the peaks in the slice.
+   - with `--at`, the values at atoms;
+   - with `--near`, the atoms and peaks around a point.
 
-   Options: `--map NAME` lists only that map; `--peaks N` sets the whole-map lists and `--stop-peaks N` the
-   per-stop lists (default 8). A label in another residue also gets its `h`, which tells which side of the
-   frame plane that residue lies on.
-
-   Every statement in a stop text should come from these numbers.
-3. **Build**: `moorlight share spec.json -o page.html`. The command prints the size. An artifact page must stay at
-   or below 16 MB. A small-molecule cell map takes about 0.4 MB.
-4. **Hand it over**:
+   Options: `--map NAME` lists only that map; `--peaks N` and `--stop-peaks N` set the list lengths.
+4. **Build**: `moorlight share spec.json -o page.html`. The command prints the size. An artifact page must stay at
+   or below 16 MB; a small-molecule cell map takes about 0.4 MB.
+5. **Hand it over**:
    - Publish it as an artifact (Artifact tool: `file_path` = the page, `icon` "molecule", a one-sentence
-     `description`). The page is written in the artifact form, without `<!doctype>`/`<html>`/`<head>`/`<body>`.
+     `description`). The page is in the artifact form, without `<!doctype>`/`<html>`/`<head>`/`<body>`.
+   - Republishing the same file path keeps the link.
    - Or build with `--standalone` for a file someone opens locally.
 
    The page cannot be rendered on a cluster node without a browser. Say so if you could not look at it.
@@ -59,20 +62,14 @@ Nothing runs on the cluster after the page is written.
 ## What the numbers mean
 
 - **Maps are not resampled.** A map whose cell grid has up to 4 million points is stored on its own grid over the
-  whole unit cell, and the page wraps it periodically. Values and peak heights are then the same as in Coot.
-  Larger maps are resampled on a box around the models (`"grid": "box"`; tricubic, step half the grid spacing),
-  and `--check` says so.
-- **Peaks** are grid points that are the extreme of their 3×3×3 neighbourhood. One finder serves every list, so
-  the same peak has the same value everywhere. Within a stop, each peak is shown at its lattice image nearest the
-  stop centre.
-- **Values at atoms** are trilinear interpolation on the stored grid. A tap on the page shows the same number.
-- **`h`** is the signed distance from the best plane through the stop's frame atoms. With `orient: face` it is
-  positive towards the viewer; with `edge`, positive is up on the screen. Use it for statements like "0.7 Å out of
-  the guest plane".
-- **Neighbouring cells**: by default the page also draws, in grey lines, the copies of every residue that come
-  within `neighbour_margin` Å (default 5) of the model, as Coot draws symmetry atoms. `--check` names them with
-  a tag, `S/14 O [-a]` (one lattice vector a back) or `[x,-y,z+1/2 +b]` (operator, then shift). Specs accept the
-  same text, so a stop can label or centre on a copy. Set `"neighbours": false` on a model to leave them out.
+  unit cell and wraps periodically. Values and peak heights match Coot. Larger maps are resampled on a box around
+  the models (`"grid": "box"`, tricubic).
+- **Peaks** are grid points that are the extreme of their 3×3×3 neighbourhood. One finder serves every list.
+- **Values at atoms** are trilinear interpolation on the stored grid, the same number a tap shows.
+- **`h`** is the signed distance from a plane (plane lists) or from the frame atoms' plane (`--near --frame`).
+- **Neighbour copies** are drawn in grey for residues within `neighbour_margin` Å (default 5) of the model. They
+  are named with a tag, `S/14 O [-a]`, and specs accept the same text. Set `"neighbours": false` on a model to
+  leave them out.
 
 ## Spec
 
@@ -80,15 +77,14 @@ Nothing runs on the cluster after the page is written.
 {
   "title": "Cage 3.5 ps",
   "description": "Light minus dark at 3.5 ps on the dark structure; contours in noise SD.",
-  "models": [{"path": "dark.pdb", "name": "dark", "hydrogens": false}],
+  "models": [{"path": "dark.pdb", "name": "dark"}],
   "maps": [{"path": "3p5ps_corrected.ccp4", "name": "3.5 ps light - dark", "kind": "diff",
             "units": "absolute", "unit_label": "SD", "level": 4.0, "visible": true}],
-  "contour_radius": 10,
-  "stops": [
-    {"name": "Azo bond, guest 102", "text": "Two to four sentences, with numbers.",
-     "center": "-/102", "radius": 7, "orient": "edge", "frame": ["-/102 C8", "-/102 N9", "-/102 N10", "-/102 C11"],
-     "maps": {"3.5 ps light - dark": 4.0}, "labels": ["-/102 N9", "-/102 N10", "S/14 O [-a]"],
-     "distances": [["-/102 N9", "-/102 N10"]]}
+  "view": {"center": ["A/1", "A/2", "A/3"], "radius": 13, "labels": ["-/102 N9"]},
+  "planes": [
+    {"name": "Guest 102 azo", "atoms": ["-/102 C8", "-/102 N9", "-/102 N10", "-/102 C11"],
+     "map": "3.5 ps light - dark", "level": 4, "thickness": 0.5, "radius": 6, "copies": [-1, 1]},
+    {"name": "Across the azo bond", "center": "-/102 N9", "normal": ["-/102 N9", "-/102 N10"]}
   ]
 }
 ```
@@ -99,76 +95,60 @@ Nothing runs on the cluster after the page is written.
   - `path` (PDB/mmCIF) and `name`;
   - optional `color` (carbon colour, CSS);
   - `hydrogens` (default false);
-  - `style` (`sticks` default, or `lines`);
+  - `style` (`sticks` or `lines`);
   - `visible`;
   - `neighbours` (default true).
 - **maps**:
   - `path`: a CCP4/MRC map, or an MTZ with `columns: "F,PHI"`.
-  - `name`: unique; stops refer to it.
-  - `kind`: `diff` (green + / red − contours) or `2fofc` (one blue contour).
+  - `name`: unique; planes refer to it.
+  - `kind`: `diff` (green + / red −) or `2fofc` (blue).
   - `units` and `level`, `visible`.
-  - `grid`: `auto` (default), `native` or `box`. For `box`, also `step` and the top-level `region`.
-  - `units: "sigma"` (default): levels are multiples of the whole map's rms, as in Coot's default.
-  - `units: "absolute"`: levels are in the map's own units. Use this for maps already scaled to noise SD. Their
-    rms includes signal, so σ contours would mislead. `unit_label` is the text after the number ("SD").
-- **contour_radius**: how far from the view centre maps are contoured, in Å (default 10, as Coot's map radius). A
-  stop may set its own.
-- **neighbour_margin**: Å around the model within which neighbour copies are drawn (default 5).
-- **region** (only for `grid: box`): `{"margin": 5}` around all models, or `{"center": SPEC, "radius": 12}` for a
-  cube.
-- **stops** (optional; without stops the page opens on the whole model):
-  - `center`: atom spec, residue spec (centroid), a list of specs (centroid) or `[x, y, z]`.
-  - `radius`: Å of context that fits the screen (default 8). `slab`: depth half-thickness (default `radius`).
-  - `orient`: `face` (default; the frame atoms' plane faces the viewer, longest axis horizontal), `edge` (that
-    plane seen edge-on, its normal pointing up, which shows out-of-plane motion), `keep` (the previous stop's
-    rotation) or a quaternion `[x, y, z, w]`. `frame` lists the atoms that define the plane; the default is the
-    centre's atoms. A lone atom (a metal) uses itself and the atoms within 2.6 Å (its coordination). Otherwise
-    fewer than three atoms keep the rotation.
-  - `maps`: `{map name: level}` shows that map at that level, `false` hides it. Maps not named go back to their
-    defaults from `maps`, so every stop looks the same however the viewer got there.
-  - `labels`: atom specs to label. `distances`: pairs of atom specs.
-  - `contour_radius`: overrides the global one for this stop.
-  - `text`: plain text. A blank line starts a new paragraph.
+  - `grid`: `auto`, `native` or `box`; for `box`, also `step` and a top-level `region`.
+  - `units: "sigma"` (default): levels are multiples of the whole map's rms.
+  - `units: "absolute"`: levels are in the map's own units. Use this for maps already in noise SD, whose rms
+    includes signal. `unit_label` is the text after the number ("SD").
+- **contour_radius**: Å around the view centre that is contoured (default 10, Coot's map radius).
+- **view** (optional; default the whole structure) — the starting view and what Reset view returns to:
+  - `center`: atom spec, residue spec, a list of specs (centroid) or `[x, y, z]`.
+  - `radius`: Å that fit the screen. `slab`: depth half-thickness.
+  - `orient`: `face` (default; the `frame` atoms' plane faces the viewer, by default the centre's atoms), `edge`,
+    or a quaternion `[x, y, z, w]`.
+  - `maps`: `{name: level}` or `false`. `labels` and `distances`: atom specs.
+- **planes** (preset slice planes; the viewer sees them in a list and can look at, hide, copy, edit or delete
+  them):
+  - Placement: `atoms` (three or more) gives their best plane through their centroid. `center` + `normal` gives a
+    plane through that point; `normal` is a vector or two atom specs (from the first to the second). `center`
+    may also be given with `atoms` to move the plane's centre.
+  - `axis`: two atom specs that set the plane's horizontal direction.
+  - `offset`: Å along the normal.
+  - `copies`: extra parallel planes at these offsets from it (Å, e.g. `[-1, 1]`), named "<name> +1 Å".
+  - `thickness`: Å. A thick slice shows the strongest value within it, with its sign kept.
+  - `radius`: half the square's side (default `contour_radius`).
+  - `map`: the map shown (default the first visible).
+  - `level`: fixed contour level for this plane (default: follows the map's slider).
+  - `color`: outline colour, CSS hex. `visible`: default true.
 
 **Atom specs**:
-- `A/85 CA`, `A/85 LYS CA:B` (altloc B), `2#A/85 SG` (model 2 in spec order), `A/85` (residue: its heavy atoms,
-  or their centroid as a centre).
-- A neighbour copy adds its tag: `S/14 O [-a]`.
-- Chain names are as in the file, for example `-`.
-- Without an altloc, an atom spec takes the first conformer; `--at` lists every conformer.
-- An unknown atom gives an error that lists the atoms of that residue. An unknown copy lists the copies drawn.
-- On the command line, `--at -/102` and `--near -/102` work as written.
+- `A/85 CA`, `A/85 LYS CA:B` (altloc B), `2#A/85 SG` (model 2), `A/85` (residue: its heavy atoms).
+- A neighbour copy adds its tag: `S/14 O [-a]`. Chain names are as in the file, e.g. `-`.
+- An unknown atom gives an error that lists the atoms of that residue.
 
 ## The page
 
-The page is a viewer first. Its panel, from top to bottom:
 - **Maps:** visibility and a log-scale level slider for each map.
-- **Maps drawn as:**
-  - Mesh: marching cubes, Coot's chicken wire.
-  - Surface: shaded and transparent.
-  - Slice: an Olex2-style section through the focus. It faces the viewer and turns with the molecule until it
-    is fixed, and shows the first visible map in green/red with contour lines at 1, 2, 4, 8 … × level.
-  - Slice controls: depth and two tilt sliders, Fix plane, Through labelled atoms (the best plane through three
-    or more tapped atoms; the view turns to face it) and Face me.
-- **Structure:** a checkbox for each model and for the neighbouring cells, hydrogens, clear labels, slab.
-- **Saved views:** the stops, as a menu with ◀ ▶. A stop's text is a collapsed note.
-
-Other details:
-- Theme: one deliberate dark look (Coot black).
-- Layout: on an upright phone the panel sits under the view; on a phone turned sideways and on wide screens it
-  sits beside it.
-- Full screen: the button at the top right of the view (or F) shows the view alone, with level and depth
-  sliders, ◀ ▶ and an Atoms toggle (A).
-
-## Writing the saved views
-
-Stops are saved views with an optional short note; the page is used as a viewer, so keep notes brief.
-
-- Start with an overview stop (the whole molecule, `radius` large enough), then one stop per finding.
-- One finding per stop, two to four sentences. Name the map and the level, and give the numbers from `--check`
-  ("−14.0 SD on N9; +12.2 SD 0.7 Å from it, h −1.0 Å").
-- The page is read on a phone; keep it short.
-- Show each map only where it is needed and say which one is on.
-- Report what the map shows. Interpretation that the user has not established does not belong in the texts.
-- Check every stop in the `--check` output: are the centre and labels right, and is the strongest feature where
-  the text says?
+- **Maps drawn as:** Mesh, Surface or Slice. In slice mode:
+  - the live plane (yellow outline) faces the viewer and turns with the molecule until it is fixed;
+  - sliders for depth, thickness and two tilts;
+  - buttons: Fix plane, Through labelled atoms (best plane through three or more tapped atoms), Face me, and
+    Save plane (S).
+- **Planes:** the preset planes and the viewer's own saved ones, each with its outline colour.
+  - Tap a name to look at that plane, centred and face-on.
+  - The checkbox hides it.
+  - Copy adds a parallel plane at the copy offset (slider, −5 to +5 Å).
+  - Edit makes it the live plane; × removes it.
+  - The viewer's own planes and copies are kept in their browser. Presets come with the page.
+- **Structure:** a checkbox for each model and for the neighbouring cells, plus hydrogens, clear labels, slab and
+  Reset view.
+- **Full screen** (button or F): level and depth sliders, Fix plane, Save, and an Atoms toggle (A).
+- **Theme:** one deliberate dark look (Coot black).
+- **Layout:** on an upright phone the panel sits under the view, otherwise beside it.

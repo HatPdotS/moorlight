@@ -701,6 +701,18 @@ function goToPlane(i) {
   animateTo(pl.p0.clone(), new THREE.Quaternion().setFromRotationMatrix(pl.Rt.clone().transpose()));
   status(`${pl.name}${pl.level != null ? `, contoured at ${pl.level}` : ""}`);
 }
+// a parallel copy of a plane, moved along its normal by the copy offset; it belongs to the viewer
+function copyPlane(i) {
+  const pl = S.planes[i];
+  const off = +$("#copy-offset").value || 0;
+  const n = new THREE.Vector3().setFromMatrixColumn(pl.Rt, 2).normalize();
+  planeCount += 1;
+  addSavedPlane({ name: `${pl.name} ${off >= 0 ? "+" : "\u2212"}${Math.abs(off).toFixed(1)} Å`,
+    color: PLANE_COLORS[(planeCount - 1) % PLANE_COLORS.length], p0: pl.p0.clone().addScaledVector(n, off),
+    Rt: pl.Rt.clone(), r: pl.r, thick: pl.thick, map: pl.map, level: pl.level, visible: true });
+  renderPlaneList(); storePlanes(); redraw();
+  status(`Copied ${pl.name}, ${off.toFixed(1)} Å along its normal.`);
+}
 function removePlane(i) {
   const [pl] = S.planes.splice(i, 1);
   world.remove(pl.mesh);
@@ -726,7 +738,8 @@ function renderPlaneList() {
     li.innerHTML = `<input type="checkbox" id="plane-vis-${i}"><label for="plane-vis-${i}"><span class="chip" ` +
       `style="border-color:${chip}" aria-hidden="true"></span></label>` +
       `<button type="button" class="go"></button>` +
-      `<button type="button">Edit</button><button type="button" aria-label="Delete">&times;</button>`;
+      `<button type="button">Copy</button><button type="button">Edit</button>` +
+      `<button type="button" aria-label="Delete">&times;</button>`;
     const go = li.querySelector(".go");
     go.textContent = pl.name + (pl.preset ? "" : " (yours)");
     go.title = `Look at ${pl.name}: ${pl.map.info.name}${pl.thick ? `, ${pl.thick.toFixed(1)} Å thick` : ""}`;
@@ -734,7 +747,9 @@ function renderPlaneList() {
     const cb = li.querySelector("input");
     cb.checked = pl.visible;
     cb.addEventListener("change", () => { pl.visible = cb.checked; storePlanes(); redraw(); });
-    const [, edit, del] = li.querySelectorAll("button");
+    const [, copy, edit, del] = li.querySelectorAll("button");
+    copy.setAttribute("aria-label", `Copy ${pl.name} at the copy offset`);
+    copy.addEventListener("click", () => copyPlane(i));
     edit.addEventListener("click", () => editPlane(i));
     del.setAttribute("aria-label", `Delete ${pl.name}`);
     del.addEventListener("click", () => removePlane(i));
@@ -742,12 +757,13 @@ function renderPlaneList() {
   });
   $("#plane-list").hidden = !S.planes.length;
   $("#planes-empty").hidden = S.planes.length > 0;
+  $("#copy-row").hidden = !S.planes.length;
 }
 function storePlanes() {
   try {
     localStorage.setItem(PLANE_KEY, JSON.stringify({ count: planeCount, planes: S.planes.filter((pl) => !pl.preset).map((pl) => ({ name: pl.name,
       color: pl.color, p0: pl.p0.toArray(), Rt: pl.Rt.toArray(), r: pl.r, thick: pl.thick, map: pl.map.info.name,
-      visible: pl.visible })) }));
+      level: pl.level, visible: pl.visible })) }));
   } catch (err) { /* storage blocked */ }
 }
 function loadPlanes() {
@@ -759,7 +775,7 @@ function loadPlanes() {
     const map = S.maps.find((m) => m.info.name === p.map);
     if (!map) continue;
     addSavedPlane({ name: p.name, color: p.color, p0: new THREE.Vector3(...p.p0), Rt: new THREE.Matrix4().fromArray(p.Rt),
-      r: p.r, thick: p.thick, map, level: null, visible: p.visible !== false });
+      r: p.r, thick: p.thick, map, level: p.level ?? null, visible: p.visible !== false });
   }
 }
 function setTilt(axis, deg) {
@@ -1147,6 +1163,10 @@ $("#slice-tilt-x").addEventListener("input", (e) => setTilt("tiltX", +e.target.v
 $("#slice-tilt-y").addEventListener("input", (e) => setTilt("tiltY", +e.target.value));
 $("#slice-face").addEventListener("click", faceMe);
 $("#slice-thick").addEventListener("input", (e) => setThickness(+e.target.value));
+$("#copy-offset").addEventListener("input", (e) => {
+  const v = +e.target.value;
+  $("#copy-offset-out").textContent = `${v >= 0 ? "+" : "\u2212"}${Math.abs(v).toFixed(1)} Å`;
+});
 for (const b of [$("#slice-save"), $("#mini-save")]) b.addEventListener("click", savePlane);
 $("#slice-atoms").addEventListener("click", planeThroughLabels);
 $("#mini-atoms").addEventListener("click", toggleStructure);
