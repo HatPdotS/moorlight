@@ -94,6 +94,22 @@ the same rules.
 
 `goto` takes `radius` (Å of context around the residue, default 5; 0 = only centre) and `slab` (depth half-thickness in Å).
 
+## Shareable pages (no server)
+
+`moorlight-share` (or `moorlight share`) writes one self-contained HTML viewer page. It runs on a phone, as a
+claude.ai artifact, or as a file opened locally. The page holds the models, their symmetry neighbours, the maps on
+their own grids, and preset slice planes. The browser contours the maps itself (mesh, surface, or an Olex2-style slice).
+
+```
+moorlight-share init model.pdb maps.mtz -o spec.json --plane "Ligand=A/401" --build page.html
+moorlight-share spec.json --check          # peaks, planes and values at atoms, as the page shows them
+moorlight-share spec.json -o page.html --standalone
+```
+
+`init` reads models (PDB/mmCIF) and maps. An MTZ gives its 2mFo-DFc and mFo-DFc maps; CCP4/MRC maps (also EM
+boxes) are read as they are. The bundled `moorlight-share` skill, installed with `moorlight --install-skill`, has the
+spec format and the agent workflow.
+
 ## Notes / limits (v0.1)
 
 - Real-space refinement uses trilinear interpolation of the map and a simple non-bonded repulsion. Ramachandran restraints are not used yet.

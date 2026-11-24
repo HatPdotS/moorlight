@@ -27,6 +27,7 @@ Issues = "https://github.com/MotivatedScientist/moorlight/issues"
 
 [project.scripts]
 moorlight = "moorlight.__main__:main"
+moorlight-share = "moorlight.share:main"
 moorlight-mcp = "moorlight.mcp:main"
 
 [tool.setuptools]

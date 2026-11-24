@@ -3,9 +3,10 @@
 No server is needed to view it. The page contours the maps itself (three.js from a CDN), so it can be sent as a
 file or published as a claude.ai artifact and opened on a phone.
 
+    moorlight share init model.pdb maps.mtz -o spec.json --build view.html    # draft spec (and page) from files
     moorlight share spec.json -o view.html        # build the page
-    moorlight share spec.json --check             # numbers for writing stop texts: peaks, values at atoms
-    moorlight share spec.json --check --at "-/102 N9" --near "-/102" --radius 4
+    moorlight share spec.json --check             # what the page shows: peaks, planes, values at atoms
+    moorlight share spec.json --check --at "A/85 SG" --near "A/301" --radius 4
 
 The spec (JSON; paths relative to the spec file):
 
@@ -16,7 +17,8 @@ The spec (JSON; paths relative to the spec file):
                "units": "absolute", "unit_label": "SD", "level": 4.0, "visible": true}],
      "view": {"center": "-/102", "radius": 8, "orient": "face", "labels": ["-/102 N9"]},
      "planes": [{"name": "Azo 102", "atoms": ["-/102 C8", "-/102 N9", "-/102 N10", "-/102 C11"],
-                 "thickness": 0.5, "map": "3.5 ps light - dark"}]}
+                 "thickness": 0.5, "map": "3.5 ps light - dark"},
+                {"name": "Pd site", "coordination": "A/1 PD"}]}
 
 See skills/moorlight-share/SKILL.md for every field.
 """
@@ -36,14 +38,15 @@ import gemmi
 import numpy as np
 from scipy.spatial import cKDTree
 
-from .maps import SymMapper, detect_columns, check_columns, guess_kind
+from .maps import DEFAULT_VISIBLE, SymMapper, detect_columns, check_columns, guess_kind
 from .model import Molecule
 from .session import parse_atom_spec
 
 WEB = os.path.join(os.path.dirname(__file__), "web")
 MAX_BYTES = 15 * 1024 * 1024    # artifact pages must stay at or below 16 MB
-NATIVE_LIMIT = 4_000_000        # maps up to this many grid points are kept on their own grid
+POINT_BUDGET = 8_000_000        # grid points stored for all maps together (~1.4 bytes each on the page)
 NEIGHBOUR_COLOR = "#8a9099"
+WATERS = ("HOH", "WAT", "DOD", "H2O")
 _TAGGED = re.compile(r"^(.*?)\s*\[([^\]]*)\]\s*$")
 
 
@@ -85,7 +88,7 @@ class Neighbours:
                 if ident and not any(t):
                     continue
                 X = (Fo + np.array(t)) @ M.T
-                tag = ("" if ident else op.triplet() + " ") + _shift_tag(t)
+                tag = (("" if ident else op.triplet() + " ") + _shift_tag(t)).strip()
                 for g in groups:
                     if np.isfinite(tree.query(X[g], distance_upper_bound=margin)[0]).any():
                         self.orig.extend(g.tolist())
@@ -232,18 +235,30 @@ class Atoms:
         return ", ".join(seen[:limit]) + (" ..." if len(seen) > limit else "")
 
 
+def coordination_cutoff(element):
+    """Default metal-ligand cutoff (A): 2.6, or 2.8 for alkali and alkaline-earth ions (Ca-O up to ~2.7)."""
+    return 2.8 if element.upper() in ("NA", "K", "RB", "CS", "CA", "SR", "BA") else 2.6
+
+
+def _plane_rms(pts):
+    """rms distance of points from their best plane."""
+    c = pts - pts.mean(0)
+    return float(np.sqrt(max(np.linalg.eigvalsh(c.T @ c)[0], 0.0) / len(pts)))
+
+
 def _is_xyz(v):
     return isinstance(v, (list, tuple)) and len(v) == 3 and all(isinstance(x, (int, float)) for x in v)
 
 
 # ------------------------------------------------------------------- maps
 def read_map(spec, base):
-    """Map spec -> (gemmi.FloatGrid over the unit cell, kind). CCP4/MRC maps, or MTZ with columns 'F,PHI'."""
+    """Map spec -> (gemmi.FloatGrid over the unit cell, kind or None). CCP4/MRC maps (a map that covers part of
+    the cell has NaN elsewhere), or MTZ with columns 'F,PHI'."""
     p = _path(spec["path"], base)
     low = p.lower()
     if low.endswith((".ccp4", ".map", ".mrc")):
         g = gemmi.read_ccp4_map(p, setup=True).grid
-        return g, spec.get("kind", "diff")
+        return g, spec.get("kind")
     if low.endswith(".mtz"):
         mtz = gemmi.read_mtz_file(p)
         if spec.get("columns"):
@@ -260,18 +275,42 @@ def read_map(spec, base):
     raise ValueError(f"{p}: unknown map format (use .ccp4/.map/.mrc or .mtz)")
 
 
+def guess_map_kind(path, values):
+    """'2fofc' or 'diff' from the file name (2mFo-DFc, FWT, emd_... / mFo-DFc, DELFWT, diff, minus, omit, ...),
+    else from the values. Density maps have almost nothing below -2.5 rms (0.000-0.004 % of the grid in 2mFo-DFc
+    maps); difference maps have noise there (0.4-1.4 %, also light - dark maps with strong positive features)."""
+    name = os.path.basename(path).lower()
+    if re.search(r"2m?fo|(?<!del)fwt|^emd", name):
+        return "2fofc"
+    if re.search(r"fo-?fc|mfo-?dfc|delfwt|diff|fo-?fo|minus|omit|polder|delta", name):
+        return "diff"
+    v = values[:: max(1, values.size // 1_000_000)].astype(np.float64)
+    return "2fofc" if np.mean(v < v.mean() - 2.5 * v.std()) < 0.001 else "diff"
+
+
 class PageMap:
     """A map as the page stores it: values on a grid with positions xyz = origin + G @ (i, j, k).
 
     native: the map's own grid over the unit cell, periodic, nothing resampled (values as in Coot).
-    box: resampled on an orthogonal box (for cells too large to ship whole)."""
+    block: the part of that grid that covers the models and a margin, nothing resampled.
+    box: resampled on an orthogonal box (when even the block is too large for the page)."""
 
-    def __init__(self, spec, base, box_lo, box_hi):
+    def __init__(self, spec, base, box_lo, box_hi, budget=POINT_BUDGET):
         grid, kind = read_map(spec, base)
         whole = np.array(grid, copy=False)
         self.name = spec.get("name") or os.path.basename(spec["path"])
-        self.kind = kind if kind in ("diff", "2fofc") else "diff"
-        self.mean, self.rms = float(whole.mean()), float(whole.std())
+        finite = np.isfinite(whole)
+        self.coverage = float(finite.mean())
+        vals = whole[finite] if self.coverage < 1 else whole.ravel()
+        if not vals.size:
+            raise ValueError(f"map {self.name!r}: no values")
+        self.mean, self.rms = float(vals.mean()), float(vals.std())
+        if self.coverage < 1:                  # gemmi fills the cell outside the map's extent with NaN
+            whole = np.where(finite, whole, np.float32(self.mean))
+        kind = spec.get("kind") or kind or guess_map_kind(spec["path"], vals)
+        self.kind = {"density": "2fofc", "em": "2fofc"}.get(kind, kind)
+        if self.kind not in ("diff", "2fofc"):
+            raise ValueError(f"map {self.name!r}: kind must be 'diff' or '2fofc' (or 'density')")
         self.units = spec.get("units", "sigma")
         if self.units not in ("sigma", "absolute"):
             raise ValueError(f"map {self.name!r}: units must be 'sigma' or 'absolute'")
@@ -280,32 +319,61 @@ class PageMap:
         self.visible = bool(spec.get("visible", True))
         self.color = spec.get("color")
         self.source = os.path.basename(spec["path"])
-        mode = spec.get("grid", "auto")
-        if mode == "auto":
-            mode = "native" if whole.size <= NATIVE_LIMIT else "box"
-        self.mode = mode
         self.cell = np.array(grid.unit_cell.orth.mat.tolist())
+        n_cell = np.array(whole.shape)
+        g_cell = self.cell / n_cell                     # column a: one grid step along axis a
+        lo, hi = np.asarray(box_lo, float), np.asarray(box_hi, float)
+        corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+        g = np.linalg.solve(g_cell, corners.T).T        # the region in grid coordinates
+        b_lo, b_hi = np.floor(g.min(0)).astype(int), np.ceil(g.max(0)).astype(int)
+        block = int(np.prod(b_hi - b_lo + 1))
+        mode = spec.get("grid", "auto")
+        if mode == "auto":                              # smallest exact choice that fits the page
+            if block < 0.5 * whole.size and block <= budget:
+                mode = "block"
+            elif whole.size <= budget:
+                mode = "native"
+            else:
+                mode = "block" if block <= budget else "box"
+        self.mode = mode
+        self.filled = 0.0                               # fraction of stored points outside the map's extent
         if mode == "native":
             self.arr = np.array(whole, dtype=np.float32)
-            self.n = np.array(self.arr.shape)
-            self.G = self.cell / self.n            # column a: one grid step along axis a
+            self.n = n_cell
+            self.G = g_cell
             self.origin = np.zeros(3)
             self.wrap = True
+            self.filled = 1 - self.coverage
+        elif mode == "block":
+            idx = np.ix_(*[np.arange(a, b + 1) % n for a, b, n in zip(b_lo, b_hi, n_cell)])
+            self.arr = np.array(whole[idx], dtype=np.float32)
+            self.n = np.array(self.arr.shape)
+            self.G = g_cell
+            self.origin = g_cell @ b_lo
+            self.wrap = False
+            self.filled = float(1 - finite[idx].mean())
         elif mode == "box":
             uc = grid.unit_cell
-            step = float(spec.get("step") or min(uc.a / grid.nu, uc.b / grid.nv, uc.c / grid.nw) / 2)
-            lo, hi = np.asarray(box_lo, float), np.asarray(box_hi, float)
+            step = float(spec.get("step") or max(min(uc.a / grid.nu, uc.b / grid.nv, uc.c / grid.nw) / 2,
+                                                 (np.prod(hi - lo) / budget) ** (1 / 3)))
             self.n = np.maximum(2, np.ceil((hi - lo) / step).astype(int) + 1)
             self.arr = np.zeros(tuple(self.n), dtype=np.float32)
             tr = gemmi.Transform()
             tr.mat.fromlist([[step, 0, 0], [0, step, 0], [0, 0, step]])
             tr.vec.fromlist([float(v) for v in lo])
+            if self.coverage < 1:
+                grid = gemmi.FloatGrid(whole, grid.unit_cell, grid.spacegroup)
             grid.interpolate_values(self.arr, tr, order=3)   # tricubic: trilinear on a new grid flattens peaks
             self.G = np.eye(3) * step
             self.origin = lo
             self.wrap = False
         else:
-            raise ValueError(f"map {self.name!r}: grid must be 'auto', 'native' or 'box'")
+            raise ValueError(f"map {self.name!r}: grid must be 'auto', 'native', 'block' or 'box'")
+        # the page stores int16 steps of 1/100 of the map's rms (wider for maps with very high peaks); the values
+        # here are rounded the same way, so every number --check prints is the one the page shows
+        self.scale = max(self.rms / 100, float(np.abs(self.arr).max()) / 32000, 1e-12)
+        self._raw = self.arr                   # peaks are found before rounding, which would make plateaus
+        self.arr = (np.round(self.arr / self.scale) * self.scale).astype(np.float32)
         self.Ginv = np.linalg.inv(self.G)
         self._peaks = {}
 
@@ -342,20 +410,24 @@ class PageMap:
         key = (round(level, 4), negative)
         if key not in self._peaks:
             from scipy.ndimage import maximum_filter
-            a = self.to_level_units(self.arr)
+            a = self.to_level_units(self._raw)
             a = -a if negative else a
             mx = maximum_filter(a, size=3, mode="wrap" if self.wrap else "nearest")
-            idx = np.argwhere((a == mx) & (a > level))
-            val = a[tuple(idx.T)]
+            hit = (a == mx) & (a > level)
+            if not self.wrap:                  # the edge of a block or box is not a peak
+                hit[[0, -1]] = hit[:, [0, -1]] = hit[:, :, [0, -1]] = False
+            idx = np.argwhere(hit)
+            val = self.to_level_units(self.arr[tuple(idx.T)]) * (-1 if negative else 1)   # the page's values
             order = np.argsort(-val)
             xyz = self.origin + idx[order] @ self.G.T
             self._peaks[key] = [(p, float(-v if negative else v)) for p, v in zip(xyz, val[order])]
         return self._peaks[key]
 
     def to_json(self):
-        scale = max(float(np.abs(self.arr).max()), 1e-6) / 32000.0
-        q = np.round(self.arr / scale).astype("<i2")
-        data = base64.b64encode(gzip.compress(q.tobytes(), compresslevel=9, mtime=0)).decode()
+        scale = self.scale
+        q = np.ascontiguousarray(np.round(self.arr / scale).astype("<i2")).ravel().view(np.uint8).reshape(-1, 2)
+        # high bytes first, then low bytes: the high bytes are mostly alike and compress ~15 % better apart
+        data = base64.b64encode(gzip.compress(q[:, 1].tobytes() + q[:, 0].tobytes(), compresslevel=9, mtime=0)).decode()
         return {"name": self.name, "kind": self.kind, "units": self.units, "unit_label": self.unit_label,
                 "level": self.level, "visible": self.visible, "color": self.color, "mean": self.mean, "rms": self.rms,
                 "grid": self.mode, "n": [int(v) for v in self.n], "origin": [round(float(v), 4) for v in self.origin],
@@ -426,7 +498,8 @@ class Share:
                 if len(nb.orig):
                     neighbours[k] = nb
         self.atoms = Atoms(self.mols, neighbours)
-        self.maps = [PageMap(s, base, lo, hi) for s in spec.get("maps") or []]
+        map_specs = spec.get("maps") or []
+        self.maps = [PageMap(s, base, lo, hi, POINT_BUDGET / max(1, len(map_specs))) for s in map_specs]
         names = [x.name for x in self.maps]
         if len(set(names)) != len(names):
             raise ValueError(f"map names must be unique: {names}")
@@ -518,19 +591,43 @@ class Share:
                 yield self.atoms.nb_number[k], i, nb.xyz[i]
 
     def plane(self, p, k):
-        """Preset slice plane: the best plane through `atoms` (three or more), or `center` with a `normal` (a vector,
-        or two atom specs from the first to the second). `axis` (two atom specs) sets its horizontal direction;
-        `offset` moves it along the normal; `thickness`, `radius`, `map`, `level`, `color`, `visible`."""
+        """Preset slice plane: the best plane through `atoms` (three or more), through an atom and the atoms within
+        `cutoff` of it (`coordination`: a metal's coordination plane), or `center` with a `normal` (a vector, or two
+        atom specs from the first to the second). `axis` (two atom specs) sets its horizontal direction; `offset`
+        moves it along the normal; `thickness`, `radius`, `map`, `level`, `color`, `visible`."""
         where = f"plane {k + 1} ({p.get('name', '')!r})"
         try:
-            rms = None
-            if p.get("atoms"):
+            rms, pts, centre, ligands, shift = None, None, None, None, 0.0
+            if p.get("coordination"):
+                number, idx, xyz = self.atoms.resolve(p["coordination"])
+                if len(idx) != 1:
+                    raise ValueError("\"coordination\" is one atom, e.g. \"A/1 PD\"")
+                cut = float(p.get("cutoff") or coordination_cutoff(self._element(number, idx[0])))
+                ligands = [(nb, i, float(np.linalg.norm(x - xyz[0]))) for nb, i, x in self._drawn()
+                           if 0.1 < np.linalg.norm(x - xyz[0]) <= cut]
+                if len(ligands) < 2:
+                    raise ValueError(f"fewer than two atoms within {cut:g} A of {p['coordination']}; raise \"cutoff\"")
+                ligands.sort(key=lambda t: t[2])
+                lx = np.array([self._atom_xyz(nb, i) for nb, i, _ in ligands])
+                use = list(range(len(ligands)))
+                if len(ligands) >= 5 and p.get("equatorial", True):
+                    # octahedral and higher: the four ligands that lie flattest with the metal (equatorial plane)
+                    use = list(min(itertools.combinations(use, 4), key=lambda q: _plane_rms(np.vstack([xyz, lx[list(q)]]))))
+                pts = np.vstack([xyz, lx[use]])
+                centre = xyz[0]
+                ligands = [(self.atoms.name(nb, i), d, j in use) for j, (nb, i, d) in enumerate(ligands)]
+            elif p.get("atoms"):
                 pts = self.atoms.xyz(p["atoms"])
                 if len(pts) < 3:
-                    raise ValueError("\"atoms\" needs three or more atoms")
+                    raise ValueError("\"atoms\" needs three or more atoms (one atom: use \"coordination\")")
+            if pts is not None:
                 ex, ey, n = screen_axes(pts, "face")
-                centre = self.atoms.point(p["center"]) if "center" in p else pts.mean(0)
-                rms = float(np.sqrt(np.mean(((pts - pts.mean(0)) @ n) ** 2)))
+                if "center" in p:
+                    centre = self.atoms.point(p["center"])
+                elif centre is None:
+                    centre = pts.mean(0)
+                rms = _plane_rms(pts)
+                shift = float((centre - pts.mean(0)) @ n)
             elif "center" in p and "normal" in p:
                 centre = self.atoms.point(p["center"])
                 nv = p["normal"]
@@ -546,7 +643,8 @@ class Share:
                 ex /= np.linalg.norm(ex)
                 ey = np.cross(n, ex)
             else:
-                raise ValueError("give \"atoms\" (three or more) or \"center\" and \"normal\"")
+                raise ValueError("give \"atoms\" (three or more), \"coordination\" (one atom), or \"center\" and "
+                                 "\"normal\"")
             if p.get("axis"):
                 a, b = p["axis"]
                 d = self.atoms.point(b) - self.atoms.point(a)
@@ -567,7 +665,7 @@ class Share:
         return {"name": p.get("name") or f"Preset {k + 1}", "p0": r3(p0), "ex": r3(ex), "ey": r3(ey), "n": r3(n),
                 "r": float(p.get("radius", self.spec.get("contour_radius", 10.0))),
                 "thick": float(p.get("thickness", 0.0)), "map": name, "level": p.get("level"), "color": color,
-                "visible": bool(p.get("visible", True)), "_rms": rms}
+                "visible": bool(p.get("visible", True)), "_rms": rms, "_ligands": ligands, "_shift": shift}
 
     def payload(self):
         mols = []
@@ -610,7 +708,7 @@ class Share:
         """Peaks of one map within radius of center (their images next to it), as text lines."""
         u = x.unit_label or x.units
         lines = []
-        for neg in (False, True):
+        for neg in ((False, True) if x.kind == "diff" else (False,)):
             found = []
             for xyz, v in x.peaks(level, negative=neg):
                 p = x.image_near(xyz, center)
@@ -627,7 +725,7 @@ class Share:
         return lines
 
     def report(self, at=(), near_specs=(), near_radius=5.0, n_peaks=12, stop_peaks=8, maps_only=(), frame=None):
-        """Text for writing stop texts. maps_only: names of the maps to list (default all); frame: atom specs whose
+        """What the page shows, in numbers. maps_only: names of the maps to list (default all); frame: atom specs whose
         plane gives h for the --near lists."""
         out = []
         p = out.append
@@ -647,10 +745,14 @@ class Share:
                 continue
             u = x.unit_label or x.units
             vals = x.to_level_units(x.arr)
-            grid = (f"own grid {x.n.tolist()} over the cell, nothing resampled" if x.mode == "native"
-                    else f"resampled on a box {x.n.tolist()} x {x.G[0, 0]:.2f} A (tricubic)")
+            grid = {"native": f"own grid {x.n.tolist()} over the cell, nothing resampled",
+                    "block": f"block {x.n.tolist()} of its own grid around the models, nothing resampled",
+                    "box": f"resampled on a box {x.n.tolist()} x {x.G[0, 0]:.2f} A (tricubic)"}[x.mode]
             p(f"\nmap {x.name!r} ({x.source}, {x.kind}, {grid}): level {x.level:g} {u}; whole map mean {x.mean:.3f} "
               f"rms {x.rms:.3f}; stored values {vals.min():.2f} to {vals.max():.2f} {u}")
+            if x.filled > 0.001:
+                p(f"  WARNING: the map file covers {100 * x.coverage:.0f} % of the cell; {100 * x.filled:.0f} % of the "
+                  "stored grid lies outside it and shows the map's mean")
             for neg in ([False, True] if x.kind == "diff" else [False]):
                 pk = x.peaks(x.level, negative=neg)
                 listed = []          # symmetry/lattice copies of a peak are listed once, at the image next to the model
@@ -696,12 +798,19 @@ class Share:
             half = max(0.5, pl["thick"] / 2)
             p(f"\nplane {pl['name']!r}: through ({p0[0]:.2f}, {p0[1]:.2f}, {p0[2]:.2f}), normal ({n[0]:.3f}, {n[1]:.3f}, "
               f"{n[2]:.3f}), {2 * pl['r']:g} A square, thickness {pl['thick']:g} A"
-              + (f", atoms {pl['_rms']:.2f} A rms out of plane" if pl["_rms"] is not None else ""))
+              + (f", atoms {pl['_rms']:.2f} A rms about their best plane" if pl["_rms"] is not None else "")
+              + (f"; moved {pl['_shift']:+.2f} A along the normal to pass through the centre" if abs(pl["_shift"]) > 0.01
+                 else ""))
             near_atoms = []
             for number, i, xyz in self._drawn():
                 d = xyz - p0
                 if abs(d @ n) <= half and abs(d @ ex) <= pl["r"] and abs(d @ ey) <= pl["r"]:
                     near_atoms.append((self.atoms.name(number, i), float(d @ n)))
+            if pl["_ligands"]:
+                inp = [f"{nm} {d:.2f} A" for nm, d, used in pl["_ligands"] if used]
+                outp = [f"{nm} {d:.2f} A" for nm, d, used in pl["_ligands"] if not used]
+                p("  coordination" + (" (equatorial plane)" if outp else "") + ": " + ", ".join(inp)
+                  + ("; out of the plane: " + ", ".join(outp) if outp else ""))
             p(f"  atoms within {half:g} A of it: {len(near_atoms)}" + (": " + ", ".join(
                 f"{nm} {h:+.2f}" for nm, h in near_atoms[:20]) + (" ..." if len(near_atoms) > 20 else "") if near_atoms else ""))
             for x in self.maps:
@@ -729,9 +838,11 @@ class Share:
             c = self.atoms.point(_maybe_xyz(spec))
             p(f"\nnear {spec!r} = ({c[0]:.2f}, {c[1]:.2f}, {c[2]:.2f}), within {near_radius:g} A"
               + (f"; h = height above the plane of {frame}" if fplane is not None else "") + ":")
-            p("  atoms: " + ", ".join(f"{nm} {d:.2f}" for nm, d in self.atoms_near(c, near_radius)))
+            p("  atoms (distance" + (", h" if fplane is not None else "") + "): " + ", ".join(
+                f"{nm} {d:.2f}" + (f" h {float((xyz - fplane[0]) @ fplane[1]):+.2f}" if fplane is not None else "")
+                for nm, d, xyz in self.atoms_near(c, near_radius, with_xyz=True)))
             for x in self.maps:
-                if x.kind == "diff" and not (maps_only and x.name not in maps_only):
+                if not (maps_only and x.name not in maps_only):
                     p(f"  {x.name}:")
                     out.extend(self._peak_lines(x, c, near_radius, x.level, near, fplane, limit=max(12, stop_peaks)))
         for spec in at:
@@ -742,20 +853,22 @@ class Share:
                 p(f"  {self.atoms.name(number, i):<22} {vals}")
         return "\n".join(out)
 
-    def atoms_near(self, c, r):
-        """[(spec, distance)] of the heavy atoms drawn on the page within r of c, nearest first."""
+    def atoms_near(self, c, r, with_xyz=False):
+        """[(spec, distance)] (or (spec, distance, xyz)) of the heavy atoms drawn on the page within r of c,
+        nearest first."""
         out = []
-        for k, m in enumerate(self.mols, 1):
-            for i, e in enumerate(m.elements):
-                d = float(np.linalg.norm(m.xyz[i] - c))
-                if e != "H" and d <= r:
-                    out.append((self.atoms.name(k, i), d))
-        for k, nb in self.atoms.nb.items():
-            for i in range(len(nb.orig)):
-                d = float(np.linalg.norm(nb.xyz[i] - c))
-                if d <= r:
-                    out.append((self.atoms.name(self.atoms.nb_number[k], i), d))
-        return sorted(out, key=lambda t: t[1])
+        for number, i, xyz in self._drawn():
+            d = float(np.linalg.norm(xyz - c))
+            if d <= r:
+                out.append((self.atoms.name(number, i), d, xyz))
+        out.sort(key=lambda t: t[1])
+        return out if with_xyz else [t[:2] for t in out]
+
+    def _element(self, number, i):
+        if number <= len(self.mols):
+            return self.mols[number - 1].elements[i]
+        nb = self.atoms.nb[next(kk for kk, nn in self.atoms.nb_number.items() if nn == number)]
+        return nb.mol.elements[nb.orig[i]]
 
     def _atom_xyz(self, number, i):
         if number <= len(self.mols):
@@ -779,43 +892,42 @@ def _path(p, base):
 
 
 # ------------------------------------------------------------------- init
-def _fmt(v):
-    return ("+" if v >= 0 else "\u2212") + f"{abs(v):.1f}"
+def _map_entries(path, name, base):
+    """Spec entries for one map file. An MTZ gives every map a refinement program writes for viewing (2mFo-DFc and
+    mFo-DFc), each with its columns; `name` then prefixes the map names."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    if not path.lower().endswith(".mtz"):
+        return [{"path": path, "name": name or stem}]
+    if ":" in name:                                  # file.mtz=name:F,PHI
+        name, _, cols = name.partition(":")
+        return [{"path": path, "columns": cols, "name": name or stem}]
+    found = detect_columns(gemmi.read_mtz_file(_path(path, base)))
+    if not found:
+        raise ValueError(f"{path}: no map columns found; give them as {path}=name:F,PHI")
+    shown = [f for f in found if f[0] in DEFAULT_VISIBLE] or found[:1]
+    return [{"path": path, "columns": f"{f},{phi}", "kind": kind,
+             "name": (f"{name} {label}" if len(shown) > 1 else name) if name else label}
+            for f, phi, kind, label in shown]
 
 
-def init_spec(models, maps, title=None, units="sigma", unit_label=None, level=None, min_peak=None, n_planes=5,
-              base="."):
-    """A ready-to-build spec from files: a starting view of the whole structure and one preset slice plane per
-    group of strong features of the first map.
+def _residue_spec(sh, k, i, atom=False):
+    a = sh.mols[k - 1].info[i]
+    sp = f"{a[0]}/{a[1]}{a[2]}" + (f" {a[4]}" + (f":{a[5]}" if a[5] else "") if atom else "")
+    return sp if len(sh.mols) == 1 else f"{k}#{sp}"
 
-    Features are peaks of either sign beyond `min_peak` within 1.5 A of a model atom. Residues with more than five
-    heavy atoms are groups of their own (the plane goes through their atoms around the strongest feature); smaller
-    ones (metals, waters, counter-ions) are grouped by name (a metal's plane goes through its coordination)."""
-    spec = {"title": title or "Structure and maps", "description": "", "models": [], "maps": [], "planes": []}
-    for p in models:
-        name = os.path.splitext(os.path.basename(p))[0]
-        spec["models"].append({"path": p, "name": name})
-    for k, m in enumerate(maps):
-        path, _, name = m.partition("=")
-        d = {"path": path, "name": name or os.path.splitext(os.path.basename(path))[0], "kind": "diff",
-             "units": units, "visible": k == 0}
-        if unit_label:
-            d["unit_label"] = unit_label
-        if level is not None:
-            d["level"] = level
-        spec["maps"].append(d)
-    sh = Share(spec, base)
-    if not sh.maps:
-        return spec, sh
-    x = sh.maps[0]
-    lv = x.level
-    thr = float(min_peak if min_peak is not None else 2.5 * lv)
-    u = x.unit_label or ("\u03c3" if x.units == "sigma" else "")
-    sep = "" if u == "\u03c3" else " "
+
+def _feature_planes(sh, x, thr, n):
+    """Preset planes at the strongest features of difference map x: peaks of either sign beyond thr within 1.5 A of
+    a model atom. A residue with more than five heavy atoms is a group of its own (the plane goes through its atoms
+    around the strongest feature); smaller ones (metals, waters, ions) are grouped by name (a metal's plane is its
+    coordination)."""
     to_model = sh.atoms.near_model()
     heavy = [(k, i) for k, m in enumerate(sh.mols, 1) for i, e in enumerate(m.elements) if e != "H"]
     tree = cKDTree(np.array([sh.mols[k - 1].xyz[i] for k, i in heavy]))
-    feats = []                                   # (|v|, v, pos, model, atom index, distance)
+    size = {}                                    # (model, residue) -> heavy atom names (altlocs once)
+    for k, i in heavy:
+        size.setdefault((k, tuple(sh.mols[k - 1].info[i][:4])), set()).add(sh.mols[k - 1].info[i][4])
+    feats = []                                   # (|v|, v, model, atom index)
     for neg in (False, True):
         seen = []
         for xyz, v in x.peaks(thr, negative=neg):
@@ -825,94 +937,170 @@ def init_spec(models, maps, title=None, units="sigma", unit_label=None, level=No
             seen.append(pos)
             d, j = tree.query(pos)
             if d <= 1.5:
-                feats.append((abs(v), v, pos, *heavy[j], float(d)))
+                feats.append((abs(v), v, *heavy[j]))
     feats.sort(key=lambda f: -f[0])
-    # group: big residues alone, small ones by residue name
     groups = {}
     for f in feats:
-        m = sh.mols[f[3] - 1]
-        inf = m.info[f[4]]
-        rkey = inf[:4]
-        nheavy = len({i2[4] for i2, i3 in zip(m.info, m.elements) if i2[:4] == rkey and i3 != "H"})   # altlocs once
-        gkey = (f[3], rkey) if nheavy > 5 else (f[3], "name", inf[3])
-        groups.setdefault(gkey, []).append(f)
-    # the strongest groups; shown with residues of their own (guests, ligands) first, then groups of small residues
-    ranked = sorted(groups.items(), key=lambda kv: -kv[1][0][0])[:n_planes]
-    ranked.sort(key=lambda kv: (kv[0][1] == "name", -kv[1][0][0]))
+        inf = sh.mols[f[2] - 1].info[f[3]]
+        rkey = tuple(inf[:4])
+        big = len(size[(f[2], rkey)]) > 5
+        if big or inf[3] not in WATERS:
+            groups.setdefault((f[2], rkey) if big else (f[2], "name", inf[3]), []).append(f)
+    ranked = sorted(groups.items(), key=lambda kv: -kv[1][0][0])[:n]
+    ranked.sort(key=lambda kv: (kv[0][1] == "name", -kv[1][0][0]))   # residues of their own first
+    planes = []
+    for gkey, fs in ranked:
+        top = fs[0]
+        k, m = top[2], sh.mols[top[2] - 1]
+        inf = m.info[top[3]]
+        name = f"{inf[3]} {inf[1]}{inf[2]}"
+        res_idx = [i for i, i2 in enumerate(m.info) if i2[:4] == inf[:4] and m.elements[i] != "H"
+                   and i2[5] in ("", inf[5])]
+        if len(res_idx) >= 3:
+            hot = m.xyz[top[3]]
+            part = [i for i in res_idx if np.linalg.norm(m.xyz[i] - hot) <= 2.6] if len(res_idx) > 12 else res_idx
+            if len(part) >= 3:
+                planes.append({"name": name, "atoms": [_residue_spec(sh, k, i, atom=True) for i in part],
+                               "level": thr if top[0] > 3 * thr else x.level})
+        elif sum(1 for *_, xyz in sh._drawn() if 0.1 < np.linalg.norm(xyz - m.xyz[top[3]]) <= 2.6) >= 2:
+            planes.append({"name": f"{name} coordination", "coordination": _residue_spec(sh, k, top[3], atom=True),
+                           "level": thr if top[0] > 3 * thr else x.level})
+    return planes
 
-    def atom_spec(k, i):
-        a = sh.mols[k - 1].info[i]
-        sp = f"{a[0]}/{a[1]}{a[2]} {a[4]}" + (f":{a[5]}" if a[5] else "")
-        return sp if len(sh.mols) == 1 else f"{k}#{sp}"
 
-    def atom_name(k, i, residue=False):
-        a = sh.mols[k - 1].info[i]
-        if a[4] == a[3]:                         # one-atom residue named like its atom (PD, ZN)
-            return f"{a[3]} {a[1]}{a[2]}"
-        return f"{a[4]} ({a[3]} {a[1]}{a[2]})" if residue else a[4]
+def _ligand_planes(sh, n):
+    """Preset planes through the ligands (residues that are neither polymer nor water, largest first), then the
+    coordination of single-atom residues (metals, ions) that have two or more atoms within 2.6 A."""
+    ligands, ions = [], []
+    drawn = None
+    for k, m in enumerate(sh.mols, 1):
+        residues = {}
+        for i, (inf, e) in enumerate(zip(m.info, m.elements)):
+            if e != "H" and inf[3] not in WATERS and inf[5] in ("", "A"):
+                residues.setdefault(tuple(inf[:4]), []).append(i)
+        for rkey, idx in residues.items():
+            tab = gemmi.find_tabulated_residue(rkey[3])
+            if tab is not None and (tab.is_amino_acid() or tab.is_nucleic_acid()):
+                continue
+            name = f"{rkey[3]} {rkey[1]}{rkey[2]}"
+            if len(idx) >= 3:
+                ligands.append((len(idx), {"name": name, "atoms": [_residue_spec(sh, k, idx[0])]}))
+            elif len(idx) == 1:
+                drawn = drawn if drawn is not None else np.array([xyz for *_, xyz in sh._drawn()])
+                if np.sum((np.linalg.norm(drawn - m.xyz[idx[0]], axis=1) > 0.1)
+                          & (np.linalg.norm(drawn - m.xyz[idx[0]], axis=1) <= 2.6)) >= 2:
+                    ions.append({"name": f"{name} coordination", "coordination": _residue_spec(sh, k, idx[0], atom=True)})
+    return ([p for _, p in sorted(ligands, key=lambda t: -t[0])] + ions)[:n]
 
-    def feature_text(f, residue=False):
-        where = "on" if f[5] < 0.45 else f"{f[5]:.1f} \u00c5 from"
-        return f"{_fmt(f[1])}{sep}{u} {where} {atom_name(f[3], f[4], residue)}"
 
+def _requested_plane(sh, text):
+    """'NAME=SPEC, SPEC, ...' -> a plane: one atom gives its coordination plane, more give their best plane."""
+    name, _, specs = text.partition("=") if "=" in text else ("", "", text)
+    items = [t.strip() for t in specs.split(",") if t.strip()]
+    if not items:
+        raise ValueError(f"--plane {text!r}: give NAME=SPEC, SPEC, ... (atom or residue specs)")
+    try:
+        count = sum(len(sh.atoms.resolve(t)[1]) for t in items)
+    except ValueError as e:
+        raise ValueError(f"--plane {text!r}: {e}") from None
+    d = {"name": name.strip() or ", ".join(items)}
+    d.update({"coordination": items[0]} if count == 1 else {"atoms": items})
+    return d
+
+
+def init_spec(models, maps, title=None, units="sigma", unit_label=None, level=None, min_peak=None, n_planes=None,
+              planes=(), base=".", description=""):
+    """A ready-to-build spec from files: a starting view of the whole structure and preset slice planes.
+
+    Planes: the requested ones ('NAME=SPEC, SPEC, ...'), then up to n_planes automatic ones (default 5, or 0 when
+    planes are requested): at the strongest features of the first difference map, or, without a difference map or
+    features, through the ligands and the coordination of metals."""
+    spec = {"title": title or "Structure and maps", "description": description or "", "models": [], "maps": [],
+            "planes": []}
+    for m in models:
+        p, _, name = m.partition("=")
+        spec["models"].append({"path": p, "name": name or os.path.splitext(os.path.basename(p))[0]})
+    entries = []
+    for m in maps:
+        path, _, name = m.partition("=")
+        entries.extend(_map_entries(path, name, base))
+    names = [e["name"] for e in entries]
+    for e in entries:
+        if names.count(e["name"]) > 1:
+            e["name"] = f"{os.path.splitext(os.path.basename(e['path']))[0]} {e['name']}"
+        e["units"] = units
+        if unit_label:
+            e["unit_label"] = unit_label
+    spec["maps"] = entries
+    sh = Share(spec, base)
+    kinds = set()
+    any_diff = any(x.kind == "diff" for x in sh.maps)
+    for e, x in zip(entries, sh.maps):
+        e["kind"] = x.kind
+        e["level"] = level if level is not None and (x.kind == "diff" or not any_diff) else x.level
+        e["visible"] = x.kind not in kinds                  # the first map of each kind
+        kinds.add(x.kind)
+        x.level = e["level"]
+    diff = next((x for x in sh.maps if x.kind == "diff"), None)
+    shown = diff or (sh.maps[0] if sh.maps else None)
+    for text in planes:
+        spec["planes"].append(_requested_plane(sh, text))
+    n_auto = (0 if planes else 5) if n_planes is None else n_planes
+    auto = []
+    if diff is not None and n_auto:
+        auto = _feature_planes(sh, diff, float(min_peak if min_peak is not None else 2.5 * diff.level), n_auto)
+    if not auto and n_auto:
+        auto = _ligand_planes(sh, n_auto)
+    spec["planes"] += auto
+    if shown is not None:
+        for pl in spec["planes"]:
+            pl["map"] = shown.name
     # starting view: the whole structure (without waters), face-on
-    allxyz = np.concatenate([m.xyz[[i for i, inf in enumerate(m.info) if inf[3] not in ("HOH", "WAT", "DOD")
+    allxyz = np.concatenate([m.xyz[[i for i, inf in enumerate(m.info) if inf[3] not in WATERS
                                     and m.elements[i] != "H"]] for m in sh.mols])
     c = allxyz.mean(0)
     rad = float(np.percentile(np.linalg.norm(allxyz - c, axis=1), 90)) + 2.0
     spec["view"] = {"center": [round(float(v), 2) for v in c], "radius": round(rad, 1),
                     "orient": _quat(screen_axes(allxyz, "face"))}
-    # one preset plane per group of strong features: through the atoms around the strongest one
-    drawn = list(sh._drawn())
-    for gkey, fs in ranked:
-        k = gkey[0]
-        m = sh.mols[k - 1]
-        top = fs[0]
-        inf = m.info[top[4]]
-        res_idx = [i for i, i2 in enumerate(m.info) if i2[:4] == inf[:4] and m.elements[i] != "H"
-                   and m.info[i][5] in ("", m.info[top[4]][5])]
-        hot = m.xyz[top[4]]
-        if len(res_idx) >= 3:
-            part = [i for i in res_idx if np.linalg.norm(m.xyz[i] - hot) <= 2.6] if len(res_idx) > 12 else res_idx
-            atoms = [atom_spec(k, i) for i in part]
-            name = f"{inf[3]} {inf[1]}{inf[2]}"
-        else:                          # one-atom residue (a metal): the plane of its coordination
-            near_atoms = [(nb, i) for nb, i, xyz in drawn if 0.1 < np.linalg.norm(xyz - hot) <= 2.6]
-            if len(near_atoms) < 2:
-                continue
-            atoms = [atom_spec(k, top[4])] + [sh.atoms.name(nb, i) for nb, i in near_atoms]
-            name = f"{inf[3]} {inf[1]}{inf[2]} coordination"
-        if len(atoms) < 3:
-            continue
-        spec["planes"].append({"name": name, "atoms": atoms, "map": x.name,
-                               "level": thr if top[0] > 3 * thr else lv})
-    return spec, sh
+    return spec
 
 
 def init_main(argv):
     ap = argparse.ArgumentParser(prog="moorlight share init", description=
-                                 "Write a ready-to-build share spec from model and map files: an overview and one stop "
-                                 "per group of strong features of the first map, with draft texts that state the "
-                                 "numbers. Then edit the texts and run `moorlight share spec.json -o page.html`.")
-    ap.add_argument("files", nargs="+", help="models (.pdb/.cif) and maps (.ccp4/.map/.mrc/.mtz); name a map with "
-                                             "path=name. The first map sets the preset planes.")
+                                 "Write a ready-to-build share spec from model and map files: a starting view of the "
+                                 "whole structure and preset slice planes, plus the --check report next to it. Then "
+                                 "edit the spec if needed and run `moorlight share spec.json -o page.html`.")
+    ap.add_argument("files", nargs="+", help="models (.pdb/.cif) and maps (.ccp4/.map/.mrc/.mtz). Name a file with "
+                                             "path=name; an MTZ gives its 2mFo-DFc and mFo-DFc maps (path=name:F,PHI "
+                                             "picks columns)")
     ap.add_argument("-o", "--out", required=True, help="spec to write (.json)")
     ap.add_argument("--title", help="page name, two to four words")
+    ap.add_argument("--description", help="one line under the title")
+    ap.add_argument("--plane", action="append", default=[], metavar="NAME=SPECS",
+                    help="a preset plane: 'Azo=-/102 C8, -/102 N9, -/102 N10' (best plane through the atoms), "
+                         "'Heme=A/201' (a residue's heavy atoms) or 'Zn site=A/301 ZN' (one atom: its coordination "
+                         "plane). Repeatable")
+    ap.add_argument("--planes", type=int, default=None, dest="planes",
+                    help="automatic preset planes (default 5, or 0 when --plane is given)")
     ap.add_argument("--units", choices=["sigma", "absolute"], default="sigma")
     ap.add_argument("--unit-label", help="text after levels, e.g. SD for maps in noise SD (with --units absolute)")
-    ap.add_argument("--level", type=float, help="default contour level (default 3 for difference maps)")
+    ap.add_argument("--level", type=float, help="contour level of the difference maps (default 3 sigma)")
     ap.add_argument("--min", type=float, dest="min_peak", help="features from this level on (default 2.5 x level)")
-    ap.add_argument("--planes", "--stops", type=int, default=5, dest="planes", help="preset planes (default 5)")
     ap.add_argument("--build", metavar="PAGE", help="also build the page")
     a = ap.parse_args(argv)
     out_dir = os.path.dirname(os.path.abspath(a.out))
+    os.makedirs(out_dir, exist_ok=True)
     models, maps = [], []
     for f in a.files:
-        p = f.partition("=")[0].lower()
-        (models if p.endswith((".pdb", ".ent", ".cif", ".mmcif")) else maps).append(
-            os.path.relpath(os.path.abspath(f.partition("=")[0]), out_dir) + (("=" + f.partition("=")[2]) if "=" in f else ""))
+        path, eq, name = f.partition("=")
+        if not os.path.exists(path):
+            print(f"error: no file {path}", file=sys.stderr)
+            return 1
+        rel = os.path.relpath(os.path.abspath(path), out_dir) + (eq + name)
+        (models if path.lower().endswith((".pdb", ".ent", ".cif", ".mmcif", ".pdb.gz", ".cif.gz")) else maps).append(rel)
     try:
-        spec, sh = init_spec(models, maps, a.title, a.units, a.unit_label, a.level, a.min_peak, a.planes, out_dir)
+        spec = init_spec(models, maps, a.title, a.units, a.unit_label, a.level, a.min_peak, a.planes, a.plane, out_dir,
+                         a.description)
         with open(a.out, "w") as fh:
             json.dump(spec, fh, indent=1, ensure_ascii=False)
         sh = Share(spec, out_dir)
@@ -922,8 +1110,9 @@ def init_main(argv):
     except (ValueError, OSError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    print(f"wrote {a.out} ({len(spec['planes'])} preset planes: " + ", ".join(pl["name"] for pl in spec["planes"])
-          + f") and {check}")
+    print(f"wrote {a.out}: {len(spec['maps'])} map(s) (" + ", ".join(f"{m['name']} [{m['kind']}]" for m in spec["maps"])
+          + f"), {len(spec['planes'])} preset plane(s) (" + ", ".join(pl["name"] for pl in spec["planes"])
+          + f"); and {check}")
     if a.build:
         page = sh.html()
         with open(a.build, "w") as fh:
@@ -932,10 +1121,75 @@ def init_main(argv):
     return 0
 
 
+def list_model(path):
+    """What a model holds, in spec form: chains with their residue ranges, ligands, metal and other ions with their
+    coordination, waters and residues with alternate conformers."""
+    st = gemmi.read_structure(path)
+    st.setup_entities()
+    out = [f"{path}: " + (f"{st.spacegroup_hm}, cell " + " ".join(f"{v:g}" for v in st.cell.parameters)
+                          if st.cell.is_crystal() else "no crystal cell") + f"; {len(st)} model(s), the first listed"]
+    ns = gemmi.NeighborSearch(st[0], st.cell, 5).populate()
+    ligands, ions, waters, alts = {}, {}, 0, []
+    for ch in st[0]:
+        poly = [r for r in ch if (t := gemmi.find_tabulated_residue(r.name)) is not None
+                and (t.is_amino_acid() or t.is_nucleic_acid())]
+        if poly:
+            out.append(f"  chain {ch.name}: {len(poly)} polymer residues, {ch.name}/{poly[0].seqid.num}"
+                       f"{poly[0].seqid.icode.strip()} {poly[0].name} to {ch.name}/{poly[-1].seqid.num}"
+                       f"{poly[-1].seqid.icode.strip()} {poly[-1].name}")
+        for r in ch:
+            spec = f"{ch.name}/{r.seqid.num}{r.seqid.icode.strip()}"
+            if any(a.altloc != "\0" for a in r):
+                alts.append(spec)
+            if r in poly:
+                continue
+            if r.name in WATERS:
+                waters += 1
+                continue
+            heavy = [a for a in r if a.element.name != "H"]
+            if len(heavy) == 1:
+                a = heavy[0]
+                cut = coordination_cutoff(a.element.name)
+                near = set()
+                for m in ns.find_atoms(a.pos, "\0", radius=cut):   # marks sit in the cell; measure to the nearest image
+                    d = st.cell.find_nearest_image(a.pos, m.pos, gemmi.Asu.Any).dist()
+                    if m.to_cra(st[0]).atom.element.name != "H" and 0.1 < d <= cut:
+                        near.add((m.chain_idx, m.residue_idx, m.atom_idx, round(d, 3)))
+                ions.setdefault((r.name, a.name, cut), []).append(f"{spec} ({len(near)})")
+            else:
+                ligands.setdefault((r.name, len(heavy)), []).append(spec)
+    for (name, n), specs in ligands.items():
+        out.append(f"  ligand {name} ({n} heavy atoms): " + ", ".join(specs[:40]) + (" ..." if len(specs) > 40 else ""))
+    for (name, atom, cut), specs in ions.items():
+        out.append(f"  {name} (atom {atom}; atoms within {cut:g} A): " + ", ".join(specs[:40])
+                   + (" ..." if len(specs) > 40 else ""))
+    out.append(f"  waters: {waters}")
+    if alts:
+        out.append(f"  alternate conformers in {len(alts)} residues: " + ", ".join(alts[:30])
+                   + (" ..." if len(alts) > 30 else "") + " (specs without :B take the first conformer)")
+    return "\n".join(out)
+
+
+def list_main(argv):
+    ap = argparse.ArgumentParser(prog="moorlight share list", description=
+                                 "List chains, residue ranges, ligands, metals and waters of models, as atom specs.")
+    ap.add_argument("models", nargs="+")
+    a = ap.parse_args(argv)
+    try:
+        for m in a.models:
+            print(list_model(m))
+    except (ValueError, OSError, RuntimeError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "init":
         return init_main(argv[1:])
+    if argv and argv[0] == "list":
+        return list_main(argv[1:])
     # specs may start with '-' (chain '-'): '--at -/102' -> '--at=-/102'
     fixed, k = [], 0
     while k < len(argv):
@@ -949,7 +1203,7 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("spec", help="share spec (JSON)")
     ap.add_argument("-o", "--out", help="output page (.html); default: next to the spec")
-    ap.add_argument("--check", action="store_true", help="print peaks and values for writing the stop texts; no page")
+    ap.add_argument("--check", action="store_true", help="print what the page shows (peaks, planes, values at atoms); no page")
     ap.add_argument("--at", action="append", default=[], metavar="SPEC",
                     help="with --check: map values at these atoms or residues (repeatable)")
     ap.add_argument("--near", action="append", default=[], metavar="SPEC",

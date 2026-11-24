@@ -332,9 +332,10 @@ async function decodeMap(info) {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
-  const q = new Int16Array(await new Response(stream).arrayBuffer());
-  const f = new Float32Array(q.length);
-  for (let i = 0; i < q.length; i++) f[i] = q[i] * info.scale;
+  const u = new Uint8Array(await new Response(stream).arrayBuffer());   // int16: all high bytes, then all low bytes
+  const N = u.length / 2;
+  const f = new Float32Array(N);
+  for (let i = 0; i < N; i++) f[i] = (((u[i] << 8) | u[N + i]) << 16 >> 16) * info.scale;
   return f;
 }
 
@@ -343,7 +344,8 @@ const unit = (m) => (m.info.units === "sigma" ? "σ" : (m.info.unit_label ? " " 
 const toLevelUnits = (m, v) => (m.info.units === "sigma" ? (v - m.info.mean) / m.info.rms : v);
 
 // Stored grids: position = origin + G (i, j, k). "native" maps are the map's own grid over the unit cell
-// (periodic, wrap); "box" maps are resampled on an orthogonal box.
+// (periodic, wrap); "block" maps are a piece of that grid around the models; "box" maps are resampled on an
+// orthogonal box.
 const mat3 = (M, v) => [M[0]*v[0] + M[1]*v[1] + M[2]*v[2], M[3]*v[0] + M[4]*v[1] + M[5]*v[2], M[6]*v[0] + M[7]*v[1] + M[8]*v[2]];
 const wrapIndex = (g, n) => ((g % n) + n) % n;
 
@@ -526,14 +528,19 @@ uniform sampler3D uMap;
 uniform mat3 uGinv;
 uniform vec3 uOrigin, uN, uPos, uNeg, uNormal;
 uniform float uLevel, uThick;
-uniform int uSigned;
+uniform int uSigned, uWrap;
 varying vec3 vModel;
 varying vec2 vXY;
+// a map stored on a block or box (not the periodic cell) has no values outside it
+bool outside(vec3 idx) {
+  return uWrap == 0 && (any(lessThan(idx, vec3(-0.5))) || any(greaterThan(idx, uN - 0.5)));
+}
 float sampleAt(vec3 p) {
   vec3 idx = uGinv * (p - uOrigin);
-  return texture(uMap, (idx.zyx + 0.5) / uN.zyx).r;
+  return outside(idx) ? 0.0 : texture(uMap, (idx.zyx + 0.5) / uN.zyx).r;
 }
 void main() {
+  if (outside(uGinv * (vModel - uOrigin))) discard;
   // thin plane: the value on it; thick slice: the strongest value (sign kept) within +/- uThick / 2 of it
   float v = sampleAt(vModel);
   if (uThick > 0.01) {
@@ -576,7 +583,7 @@ function makePlaneMesh(outlineColor) {
     uniforms: {
       uMap: { value: null }, uPlane: { value: new THREE.Matrix4() }, uGinv: { value: new THREE.Matrix3() },
       uOrigin: { value: new THREE.Vector3() }, uN: { value: new THREE.Vector3() }, uPos: { value: new THREE.Color() },
-      uNeg: { value: new THREE.Color() }, uLevel: { value: 1 }, uSigned: { value: 1 },
+      uNeg: { value: new THREE.Color() }, uLevel: { value: 1 }, uSigned: { value: 1 }, uWrap: { value: 1 },
       uNormal: { value: new THREE.Vector3(0, 0, 1) }, uThick: { value: 0 },
     },
   });
@@ -597,6 +604,7 @@ function setPlaneMap(u, m) {
   u.uGinv.value.set(...m.info.Ginv);
   u.uOrigin.value.set(...m.info.origin);
   u.uN.value.set(...m.info.n);
+  u.uWrap.value = m.info.wrap ? 1 : 0;
   u.uPos.value.set(m.info.kind === "diff" ? CONTOUR.pos : (m.info.color || CONTOUR.map));
   u.uNeg.value.set(CONTOUR.neg);
   u.uSigned.value = m.info.kind === "diff" ? 1 : 0;
