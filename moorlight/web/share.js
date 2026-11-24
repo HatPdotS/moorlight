@@ -93,8 +93,8 @@ function render() {
   if (!needsRender) return;
   needsRender = false;
   updateCamera();
-  if (S.style === "volume") renderWithVolumes();
-  else renderer.render(scene, camera);
+  sliceFrame();
+  renderer.render(scene, camera);
   updateLabels();
 }
 const redraw = () => (needsRender = true);
@@ -447,6 +447,7 @@ function contourMap(m) {
   const c = S.center.toArray();
   clearMapObj(m);
   const surface = S.style === "surface";
+  m.style = S.style === "slice" ? "mesh" : S.style;
   for (const sign of m.info.kind === "diff" ? [1, -1] : [1]) {
     const k = sign > 0 ? 0 : 1;
     const mc = marchingCubes(m, c, S.radius, m.level, sign, !surface);
@@ -464,80 +465,67 @@ function contourMap(m) {
       m.obj.add(new LineSegments2(g, m.mats[k] || (m.mats[k] = lineMat(1.1, { color: mapColor(m, sign) }))));
     }
   }
-  m.drawn = { center: S.center.clone(), level: m.level, style: S.style, radius: S.radius };
+  m.drawn = { center: S.center.clone(), level: m.level, style: m.style, radius: S.radius };
   redraw();
 }
 let contourTimer = null;
 function scheduleContour(now = false) {
   clearTimeout(contourTimer);
   contourTimer = setTimeout(() => {
+    const sliced = S.style === "slice" ? activeMap() : null;
     for (const m of S.maps) {
-      const vol = S.style === "volume";
-      m.obj.visible = m.visible && !vol;
-      if (m.vol) m.vol.visible = m.visible && vol;
-      if (!m.visible) continue;
-      if (vol) { placeVolume(m); continue; }
+      m.obj.visible = m.visible && m !== sliced;
+      if (!m.visible || m === sliced) continue;
       const d = m.drawn;
-      if (d && d.center.distanceTo(S.center) < 0.5 && d.level === m.level && d.style === S.style && d.radius === S.radius) continue;
+      const want = S.style === "slice" ? "mesh" : S.style;
+      if (d && d.center.distanceTo(S.center) < 0.5 && d.level === m.level && d.style === want && d.radius === S.radius) continue;
       contourMap(m);
     }
+    updateSlice();
     redraw();
   }, now ? 0 : 120);
 }
 
-// ------------------------------------------------------------------- volume
-// Ray marching through the map inside the contour box. Samples beyond about 0.7 x level add green (+) or red (-)
-// light, more opaque the stronger they are; rays stop at the slab and at the molecules (depth from a first pass).
-const VOL = { rt: null, failed: false };
-const VOL_VS = `
-varying vec3 vLocal;
+// -------------------------------------------------------------------- slice
+// Map section as in Olex2: a plane through the focus that always faces the viewer (so it turns with the
+// molecule), at an adjustable depth. It shows the active map (the first visible one): green +, red - (blue for
+// 2mFo-DFc-like maps), stronger towards 3 x level, with contour lines at 1, 2, 4, 8 ... x level. The plane is dark
+// glass: atoms behind it are dimmed, atoms in front stay bright.
+const SLICE = { mesh: null, map: null, failed: false, depth: 0 };
+const SLICE_VS = `
+varying vec3 vScene;
 void main() {
-  vLocal = position;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec4 w = modelMatrix * vec4(position, 1.0);
+  vScene = w.xyz;
+  gl_Position = projectionMatrix * viewMatrix * w;
 }`;
-const VOL_FS = `
+const SLICE_FS = `
 precision highp float;
 precision highp sampler3D;
-#include <packing>
 uniform sampler3D uMap;
-uniform sampler2D uDepth;
-uniform mat3 uGinv;
-uniform vec3 uOrigin, uCenter, uN, uCamLocal, uCamDir, uPos, uNeg;
-uniform vec2 uRes;
-uniform float uR, uLevel, uStep, uDensity, uNear, uFar, uFogNear, uFogFar, uCamNear, uCamFar;
+uniform mat3 uGinv, uRinv;
+uniform vec3 uOrigin, uCenter, uN, uPos, uNeg;
+uniform float uLevel, uR;
 uniform int uSigned;
-varying vec3 vLocal;
+varying vec3 vScene;
 void main() {
-  vec3 d = normalize(vLocal - uCamLocal);
-  vec3 inv = 1.0 / d;
-  vec3 ta = (vec3(-uR) - uCamLocal) * inv, tb = (vec3(uR) - uCamLocal) * inv;
-  vec3 tmin = min(ta, tb), tmax = max(ta, tb);
-  float cosA = max(dot(d, uCamDir), 1e-3);
-  float t0 = max(max(max(tmin.x, tmin.y), tmin.z), uNear / cosA);
-  float t1 = min(min(min(tmax.x, tmax.y), tmax.z), uFar / cosA);
-  float depth = texture2D(uDepth, gl_FragCoord.xy / uRes).r;
-  if (depth < 1.0) t1 = min(t1, -perspectiveDepthToViewZ(depth, uCamNear, uCamFar) / cosA);
-  if (t1 <= t0) discard;
-  float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
-  vec4 acc = vec4(0.0);
-  for (int s = 0; s < 512; s++) {
-    float t = t0 + (float(s) + jitter) * uStep;
-    if (t > t1 || acc.a > 0.97) break;
-    vec3 idx = uGinv * (uCenter + uCamLocal + d * t - uOrigin);
-    float v = texture(uMap, (idx.zyx + 0.5) / uN.zyx).r;
-    if (uSigned == 0 && v < 0.0) continue;
-    float f = clamp((abs(v) - 0.7 * uLevel) / (1.3 * uLevel), 0.0, 1.0);
-    if (f <= 0.0) continue;
-    float alpha = 1.0 - exp(-uDensity * f * f * uStep);
-    float fog = 1.0 - smoothstep(uFogNear, uFogFar, t * cosA);
-    vec3 col = (v >= 0.0 ? uPos : uNeg) * (0.55 + 0.45 * f) * fog;
-    acc.rgb += (1.0 - acc.a) * alpha * col;
-    acc.a += (1.0 - acc.a) * alpha;
-  }
-  gl_FragColor = acc;
+  vec3 idx = uGinv * (uCenter + uRinv * vScene - uOrigin);
+  float v = texture(uMap, (idx.zyx + 0.5) / uN.zyx).r;
+  float a = (uSigned == 0 && v < 0.0) ? 0.0 : abs(v);
+  vec3 hue = v >= 0.0 ? uPos : uNeg;
+  float k = clamp(a / (3.0 * uLevel), 0.0, 1.0);
+  vec3 col = hue * k;
+  float alpha = 0.45 + 0.5 * k;
+  float g = log2(max(a, 1e-6) / uLevel);
+  float line = (1.0 - smoothstep(0.0, 1.5 * fwidth(g), abs(fract(g + 0.5) - 0.5))) * smoothstep(0.85, 0.95, a / uLevel);
+  col = mix(col, min(hue * 1.2 + 0.3, vec3(1.0)), line);
+  alpha = max(alpha, line);
+  float edge = max(abs(vScene.x), abs(vScene.y)) / uR;
+  alpha *= 1.0 - smoothstep(0.92, 1.0, edge);
+  gl_FragColor = vec4(col * alpha, alpha);
 }`;
 
-function volumeTexture(m) {
+function mapTexture(m) {
   if (m.tex) return m.tex;
   const [n0, n1, n2] = m.info.n;
   const half = new Uint16Array(m.values.length);
@@ -551,83 +539,68 @@ function volumeTexture(m) {
   tex.needsUpdate = true;
   return (m.tex = tex);
 }
-function placeVolume(m) {
-  const r = S.radius;
-  if (!m.vol) {
-    const G = m.info.G;
-    const spacing = Math.min(...[0, 1, 2].map((a) => Math.hypot(G[a], G[3 + a], G[6 + a])));
+function updateSlice() {
+  const m = S.style === "slice" ? activeMap() : null;
+  if (!m) { if (SLICE.mesh) SLICE.mesh.visible = false; return; }
+  if (!SLICE.mesh) {
     const mat = new THREE.ShaderMaterial({
-      vertexShader: VOL_VS, fragmentShader: VOL_FS, side: THREE.BackSide, transparent: true, premultipliedAlpha: true,
-      depthTest: false, depthWrite: false,
+      vertexShader: SLICE_VS, fragmentShader: SLICE_FS, side: THREE.DoubleSide, transparent: true,
+      premultipliedAlpha: true, depthWrite: false,
       uniforms: {
-        uMap: { value: volumeTexture(m) }, uDepth: { value: null }, uGinv: { value: new THREE.Matrix3().set(...m.info.Ginv) },
-        uOrigin: { value: new THREE.Vector3(...m.info.origin) }, uCenter: { value: new THREE.Vector3() },
-        uN: { value: new THREE.Vector3(...m.info.n) }, uCamLocal: { value: new THREE.Vector3() },
-        uCamDir: { value: new THREE.Vector3() }, uPos: { value: new THREE.Color(mapColor(m, 1)) },
-        uNeg: { value: new THREE.Color(mapColor(m, -1)) }, uRes: { value: new THREE.Vector2() },
-        uR: { value: r }, uLevel: { value: m.level }, uStep: { value: spacing * 0.5 }, uDensity: { value: 4.0 },
-        uNear: { value: 1 }, uFar: { value: 100 }, uFogNear: { value: 1 }, uFogFar: { value: 100 },
-        uCamNear: { value: 1 }, uCamFar: { value: 100 }, uSigned: { value: m.info.kind === "diff" ? 1 : 0 },
+        uMap: { value: null }, uGinv: { value: new THREE.Matrix3() }, uRinv: { value: new THREE.Matrix3() },
+        uOrigin: { value: new THREE.Vector3() }, uCenter: { value: new THREE.Vector3() }, uN: { value: new THREE.Vector3() },
+        uPos: { value: new THREE.Color() }, uNeg: { value: new THREE.Color() }, uLevel: { value: 1 }, uR: { value: 1 },
+        uSigned: { value: 1 },
       },
     });
-    m.vol = new THREE.Mesh(new THREE.BoxGeometry(2 * r, 2 * r, 2 * r), mat);
-    m.vol.renderOrder = 10;
-    m.vol.frustumCulled = false;
-    m.vol.userData.r = r;
-    world.add(m.vol);
+    SLICE.mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+    SLICE.mesh.frustumCulled = false;
+    SLICE.mesh.renderOrder = 5;
+    scene.add(SLICE.mesh);          // in screen axes: it faces the viewer whatever the rotation
   }
-  if (m.vol.userData.r !== r) {
-    m.vol.geometry.dispose();
-    m.vol.geometry = new THREE.BoxGeometry(2 * r, 2 * r, 2 * r);
-    m.vol.userData.r = r;
+  const u = SLICE.mesh.material.uniforms;
+  if (SLICE.map !== m) {
+    SLICE.map = m;
+    u.uMap.value = mapTexture(m);
+    u.uGinv.value.set(...m.info.Ginv);
+    u.uOrigin.value.set(...m.info.origin);
+    u.uN.value.set(...m.info.n);
+    u.uPos.value.set(m.info.kind === "diff" ? CONTOUR.pos : (m.info.color || CONTOUR.map));
+    u.uNeg.value.set(CONTOUR.neg);
+    u.uSigned.value = m.info.kind === "diff" ? 1 : 0;
   }
-  m.vol.position.copy(S.center);
-  const u = m.vol.material.uniforms;
-  u.uCenter.value.copy(S.center);
-  u.uR.value = r;
-  u.uLevel.value = m.level;    // the texture holds values in level units
-  m.vol.visible = m.visible;
+  u.uLevel.value = m.level;
+  u.uR.value = S.radius;
+  SLICE.mesh.scale.set(S.radius, S.radius, 1);
+  SLICE.mesh.visible = true;
 }
-// Volume style renders twice: the molecules into a depth texture, then everything with the volumes on top.
-function renderWithVolumes() {
-  const vols = S.maps.filter((m) => m.vol && m.vol.visible).map((m) => m.vol);
-  if (!vols.length) { renderer.render(scene, camera); return; }
-  const size = renderer.getDrawingBufferSize(new THREE.Vector2());
-  if (!VOL.rt || VOL.rt.width !== size.x || VOL.rt.height !== size.y) {
-    if (VOL.rt) VOL.rt.dispose();
-    VOL.rt = new THREE.WebGLRenderTarget(size.x, size.y, { depthBuffer: true });
-    VOL.rt.depthTexture = new THREE.DepthTexture(size.x, size.y);
-  }
-  for (const v of vols) v.visible = false;
-  renderer.setRenderTarget(VOL.rt);
-  renderer.render(scene, camera);
-  renderer.setRenderTarget(null);
-  scene.updateMatrixWorld();
-  const q = new THREE.Quaternion();
-  for (const v of vols) {
-    v.visible = true;
-    const u = v.material.uniforms;
-    u.uDepth.value = VOL.rt.depthTexture;
-    u.uRes.value.copy(size);
-    u.uCamLocal.value.copy(v.worldToLocal(camera.position.clone()));
-    v.getWorldQuaternion(q);
-    u.uCamDir.value.set(0, 0, -1).applyQuaternion(q.invert());
-    u.uNear.value = camera.near; u.uFar.value = camera.far;
-    u.uCamNear.value = camera.near; u.uCamFar.value = camera.far;
-    u.uFogNear.value = scene.fog.near; u.uFogFar.value = scene.fog.far;
-  }
-  renderer.render(scene, camera);
+// per frame: the plane stays in the screen plane at the chosen depth, so its map coordinates follow the rotation
+function sliceFrame() {
+  if (!SLICE.mesh || !SLICE.mesh.visible) return;
+  const u = SLICE.mesh.material.uniforms;
+  SLICE.mesh.position.set(0, 0, SLICE.depth);
+  u.uCenter.value.copy(S.center);
+  u.uRinv.value.setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(rot.quaternion)).transpose();
 }
 renderer.debug.onShaderError = (gl, program, vs, fs) => {
-  VOL.failed = true;
+  SLICE.failed = true;
   console.error("shader error", gl.getProgramInfoLog(program), gl.getShaderInfoLog(fs));
-  status("Volume rendering is not available in this browser; back to mesh.");
+  status("The map slice is not available in this browser; back to mesh.");
   setTimeout(() => setStyle("mesh"), 0);
 };
+function setSliceDepth(z) {
+  SLICE.depth = Math.max(-S.slab, Math.min(S.slab, z));
+  for (const el of [$("#slice-depth"), $("#mini-depth-range")]) el.value = String(SLICE.depth);
+  const txt = `${SLICE.depth >= 0 ? "+" : "−"}${Math.abs(SLICE.depth).toFixed(1)} Å`;
+  $("#slice-depth-out").textContent = txt;
+  $("#mini-depth-out").textContent = txt;
+  redraw();
+}
 
 function setStyle(style) {
-  if (style === "volume" && VOL.failed) style = "mesh";
+  if (style === "slice" && SLICE.failed) style = "mesh";
   S.style = style;
+  $("#app").classList.toggle("slicing", style === "slice");
   document.querySelectorAll("#style-row button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.style === style)));
   try { localStorage.setItem("moorlight-share-style", style); } catch (err) { /* storage blocked */ }
   scheduleContour(true);
@@ -709,6 +682,7 @@ function updateLevels(source = null) {
 }
 function setLevel(m, v, source = null) {
   m.level = Math.max(0.1, +v.toFixed(2));
+  if (SLICE.map === m && SLICE.mesh) { SLICE.mesh.material.uniforms.uLevel.value = m.level; redraw(); }
   if (!m.visible) m.visible = true;
   updateLevels(source);
   status(`${m.info.name}: contour at ${fmtLevel(m)}`);
@@ -761,6 +735,8 @@ function applyStop(k) {
   for (const m of S.maps) m.drawn = null;
   S.zoom = fitZoom(s.radius || 10);
   S.slab = s.slab || s.radius || 10;
+  SLICE.depth = 0;          // each stop starts with the slice through the focus
+  syncDepthRange();
   const q = s.orient ? new THREE.Quaternion(...s.orient) : null;
   animateTo(new THREE.Vector3(...s.center), q);
   scheduleContour(true);
@@ -885,15 +861,21 @@ window.addEventListener("keydown", (e) => {
 document.querySelectorAll("#style-row button").forEach((b) => b.addEventListener("click", () => setStyle(b.dataset.style)));
 try {
   const st = localStorage.getItem("moorlight-share-style");
-  if (st === "surface" || st === "volume") S.style = st;
+  if (st === "surface" || st === "slice") S.style = st;
 } catch (err) { /* storage blocked */ }
 document.querySelectorAll("#style-row button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.style === S.style)));
+$("#app").classList.toggle("slicing", S.style === "slice");
+for (const el of [$("#slice-depth"), $("#mini-depth-range")]) el.addEventListener("input", () => setSliceDepth(+el.value));
 $("#prev").addEventListener("click", () => applyStop(S.stop - 1));
 $("#next").addEventListener("click", () => applyStop(S.stop + 1));
 $("#reset").addEventListener("click", () => applyStop(S.stop));
 $("#clear").addEventListener("click", () => { clearLabels(); status(""); });
-$("#slab-down").addEventListener("click", () => { S.slab = Math.max(1, S.slab / 1.3); redraw(); });
-$("#slab-up").addEventListener("click", () => { S.slab = Math.min(200, S.slab * 1.3); redraw(); });
+$("#slab-down").addEventListener("click", () => { S.slab = Math.max(1, S.slab / 1.3); syncDepthRange(); redraw(); });
+$("#slab-up").addEventListener("click", () => { S.slab = Math.min(200, S.slab * 1.3); syncDepthRange(); redraw(); });
+function syncDepthRange() {
+  for (const el of [$("#slice-depth"), $("#mini-depth-range")]) { el.min = String(-S.slab); el.max = String(S.slab); }
+  setSliceDepth(SLICE.depth);
+}
 $("#hyd").addEventListener("click", (e) => {
   const show = S.mols.some((m) => m.hideH);
   S.mols.forEach((m, k) => { m.hideH = !show; buildMolecule(k); });

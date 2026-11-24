@@ -147,6 +147,12 @@ Nothing runs on the cluster after the page is written.
   - On a phone turned sideways, and on wide screens, the panel sits beside the view.
   - The button at the top right of the view (or F) shows the view alone, with a small floating ◀ ▶ bar for the
     stops. The page remembers that choice.
+- **Map styles:**
+  - Mesh: marching cubes, Coot's chicken wire.
+  - Surface: shaded and transparent.
+  - Slice: an Olex2-style section through the focus that faces the viewer and turns with the molecule. It shows
+    the first visible map in green/red, with contour lines at 1, 2, 4, 8 … × level, and has a depth slider.
+- **Levels:** every map has a log-scale level slider.
 
 ## Writing the tour
 

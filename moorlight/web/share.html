@@ -89,7 +89,14 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 #mini-level span { max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 0.8rem var(--font-data);
   color: var(--muted); }
 #app.full #mini-nav { display: flex; }
+#mini-depth { position: absolute; z-index: 2; left: 50%; transform: translateX(-50%);
+  bottom: calc(108px + env(safe-area-inset-bottom, 0px)); display: none; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: 8px; width: min(440px, calc(100% - 24px)); padding: 2px 10px; border-radius: 10px; }
+#mini-depth span { font: 0.8rem var(--font-data); color: var(--muted); }
+#mini-depth output { text-align: right; font: 0.85rem var(--font-data); font-variant-numeric: tabular-nums; }
 #app.full #mini-level { display: grid; }
+#app.full.slicing #mini-depth { display: grid; }
+#app.full.slicing #status { bottom: calc(158px + env(safe-area-inset-bottom, 0px)); }
 #app.full #mini-level.none { display: none; }
 #app.full #status { bottom: calc(108px + env(safe-area-inset-bottom, 0px)); }
 .stop-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -113,6 +120,10 @@ h3 { margin: 0 0 6px; font: 500 0.72rem var(--font-data); letter-spacing: 0.08em
 input[type=range] { width: 100%; min-width: 0; height: 32px; margin: 0; accent-color: var(--accent); touch-action: pan-y; }
 .view-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .seg button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.depth-row { display: grid; grid-template-columns: auto minmax(0, 1fr) 4.6em; align-items: center; gap: 8px; margin-top: 8px; }
+.depth-row label { font-size: 0.85rem; color: var(--muted); }
+.depth-row output { text-align: right; font: 0.85rem var(--font-data); font-variant-numeric: tabular-nums; }
+#app:not(.slicing) .slice-only { display: none !important; }
 .help { margin: 0; color: var(--muted); font-size: 0.82rem; max-width: 65ch; }
 kbd { font: 0.8rem var(--font-data); }
 
@@ -155,6 +166,11 @@ kbd { font: 0.8rem var(--font-data); }
       <input type="range" id="mini-level-range" min="0" max="1000" step="1">
       <output id="mini-level-out" for="mini-level-range"></output>
     </div>
+    <div id="mini-depth" class="fab slice-only" role="group" aria-label="Slice depth">
+      <span>Depth</span>
+      <input type="range" id="mini-depth-range" min="-8" max="8" step="0.1" value="0" aria-label="Slice depth">
+      <output id="mini-depth-out" for="mini-depth-range">+0.0 Å</output>
+    </div>
     <div id="mini-nav" class="fab" role="group" aria-label="Tour stops">
       <button id="mini-prev" type="button" aria-label="Previous stop">&#9664;</button>
       <span id="mini-pos"></span>
@@ -178,7 +194,12 @@ kbd { font: 0.8rem var(--font-data); }
       <div class="view-row seg" id="style-row" role="group" aria-label="Map style">
         <button type="button" data-style="mesh" aria-pressed="true">Mesh</button>
         <button type="button" data-style="surface" aria-pressed="false">Surface</button>
-        <button type="button" data-style="volume" aria-pressed="false">Volume</button>
+        <button type="button" data-style="slice" aria-pressed="false">Slice</button>
+      </div>
+      <div class="depth-row slice-only">
+        <label for="slice-depth">Slice depth</label>
+        <input type="range" id="slice-depth" min="-8" max="8" step="0.1" value="0">
+        <output id="slice-depth-out" for="slice-depth">+0.0 Å</output>
       </div>
     </div>
     <div>
