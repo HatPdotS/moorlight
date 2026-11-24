@@ -27,7 +27,8 @@ const S = {
   labels: new Map(),   // "mol:idx" -> div
   distances: [],
   radius: DATA.contour_radius || 10,
-  style: "mesh",       // mesh | surface | volume
+  style: "mesh",       // mesh | surface | slice
+  planes: [],          // saved slice planes
 };
 
 // ------------------------------------------------------------------ three
@@ -550,6 +551,40 @@ function mapTexture(m) {
   tex.needsUpdate = true;
   return (m.tex = tex);
 }
+// a slice plane: unit square with the map shader and an outline; its matrix (model coordinates) places it
+function makePlaneMesh(outlineColor) {
+  const mat = new THREE.ShaderMaterial({
+    vertexShader: SLICE_VS, fragmentShader: SLICE_FS, side: THREE.DoubleSide, transparent: true,
+    premultipliedAlpha: true, depthWrite: false,
+    uniforms: {
+      uMap: { value: null }, uPlane: { value: new THREE.Matrix4() }, uGinv: { value: new THREE.Matrix3() },
+      uOrigin: { value: new THREE.Vector3() }, uN: { value: new THREE.Vector3() }, uPos: { value: new THREE.Color() },
+      uNeg: { value: new THREE.Color() }, uLevel: { value: 1 }, uSigned: { value: 1 },
+      uNormal: { value: new THREE.Vector3(0, 0, 1) }, uThick: { value: 0 },
+    },
+  });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+  mesh.matrixAutoUpdate = false;
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 5;
+  const frame = new LineSegmentsGeometry();
+  frame.setPositions([-1, -1, 0, 1, -1, 0, 1, -1, 0, 1, 1, 0, 1, 1, 0, -1, 1, 0, -1, 1, 0, -1, -1, 0]);
+  const outline = new LineSegments2(frame, lineMat(2, { color: outlineColor }));
+  outline.frustumCulled = false;
+  mesh.add(outline);
+  world.add(mesh);
+  return mesh;
+}
+function setPlaneMap(u, m) {
+  u.uMap.value = mapTexture(m);
+  u.uGinv.value.set(...m.info.Ginv);
+  u.uOrigin.value.set(...m.info.origin);
+  u.uN.value.set(...m.info.n);
+  u.uPos.value.set(m.info.kind === "diff" ? CONTOUR.pos : (m.info.color || CONTOUR.map));
+  u.uNeg.value.set(CONTOUR.neg);
+  u.uSigned.value = m.info.kind === "diff" ? 1 : 0;
+  u.uLevel.value = m.level;
+}
 function updateSlice() {
   const m = S.style === "slice" ? activeMap() : null;
   if (!m) {
@@ -558,27 +593,7 @@ function updateSlice() {
     return;
   }
   if (!SLICE.mesh) {
-    const mat = new THREE.ShaderMaterial({
-      vertexShader: SLICE_VS, fragmentShader: SLICE_FS, side: THREE.DoubleSide, transparent: true,
-      premultipliedAlpha: true, depthWrite: false,
-      uniforms: {
-        uMap: { value: null }, uPlane: { value: new THREE.Matrix4() }, uGinv: { value: new THREE.Matrix3() },
-        uOrigin: { value: new THREE.Vector3() }, uN: { value: new THREE.Vector3() }, uPos: { value: new THREE.Color() },
-        uNeg: { value: new THREE.Color() }, uLevel: { value: 1 }, uSigned: { value: 1 },
-        uNormal: { value: new THREE.Vector3(0, 0, 1) }, uThick: { value: 0 },
-      },
-    });
-    // unit square; its matrix (in model coordinates) places, turns and sizes it every frame
-    SLICE.mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
-    SLICE.mesh.matrixAutoUpdate = false;
-    SLICE.mesh.frustumCulled = false;
-    SLICE.mesh.renderOrder = 5;
-    const frame = new LineSegmentsGeometry();
-    frame.setPositions([-1, -1, 0, 1, -1, 0, 1, -1, 0, 1, 1, 0, 1, 1, 0, -1, 1, 0, -1, 1, 0, -1, -1, 0]);
-    const outline = new LineSegments2(frame, lineMat(2, { color: 0xe6c229 }));
-    outline.frustumCulled = false;
-    SLICE.mesh.add(outline);
-    world.add(SLICE.mesh);
+    SLICE.mesh = makePlaneMesh(0xe6c229);
     // atoms the plane cuts through
     const total = S.mols.reduce((t, x) => t + x.data.atoms.length, 0);
     SLICE.halo = new THREE.InstancedMesh(sphereGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true,
@@ -587,43 +602,41 @@ function updateSlice() {
     SLICE.halo.frustumCulled = false;
     world.add(SLICE.halo);
   }
-  const u = SLICE.mesh.material.uniforms;
-  if (SLICE.map !== m) {
-    SLICE.map = m;
-    u.uMap.value = mapTexture(m);
-    u.uGinv.value.set(...m.info.Ginv);
-    u.uOrigin.value.set(...m.info.origin);
-    u.uN.value.set(...m.info.n);
-    u.uPos.value.set(m.info.kind === "diff" ? CONTOUR.pos : (m.info.color || CONTOUR.map));
-    u.uNeg.value.set(CONTOUR.neg);
-    u.uSigned.value = m.info.kind === "diff" ? 1 : 0;
-  }
-  u.uLevel.value = m.level;
+  if (SLICE.map !== m) { SLICE.map = m; setPlaneMap(SLICE.mesh.material.uniforms, m); }
+  SLICE.mesh.material.uniforms.uLevel.value = m.level;
   SLICE.mesh.visible = SLICE.halo.visible = true;
 }
-// per frame: place the plane. It faces the viewer through the focus (or stays where it was fixed), at the chosen
-// depth along its normal; atoms within 0.5 Å of it get a halo.
+// where the live plane is: facing the viewer through the focus (or where it was fixed), tilted, at the chosen depth
+// along its normal. Fills _Rt (axes as columns), _M (placement of the unit square), _n, _ex, _ey, _p0.
 const _M = new THREE.Matrix4(), _T = new THREE.Matrix4(), _Rt = new THREE.Matrix4();
 const _n = new THREE.Vector3(), _ex = new THREE.Vector3(), _ey = new THREE.Vector3(), _p0 = new THREE.Vector3();
-function sliceFrame() {
-  if (!SLICE.mesh || !SLICE.mesh.visible) return;
+function livePlacement() {
   const c = SLICE.lock ? SLICE.lock.c : S.center;
   if (SLICE.lock) _Rt.copy(SLICE.lock.Rt);
   else _Rt.makeRotationFromQuaternion(rot.quaternion).transpose();
-  // tilt about the plane's own horizontal, then vertical axis
   _Rt.multiply(_T.makeRotationX(THREE.MathUtils.degToRad(SLICE.tiltX))).multiply(_T.makeRotationY(THREE.MathUtils.degToRad(SLICE.tiltY)));
   const r = S.radius;
   _M.makeTranslation(c.x, c.y, c.z).multiply(_Rt).multiply(_T.makeTranslation(0, 0, SLICE.depth))
     .multiply(_T.makeScale(r, r, 1));
-  SLICE.mesh.matrix.copy(_M);
-  SLICE.mesh.matrixWorldNeedsUpdate = true;
-  SLICE.mesh.material.uniforms.uPlane.value.copy(_M);
   _ex.setFromMatrixColumn(_Rt, 0); _ey.setFromMatrixColumn(_Rt, 1); _n.setFromMatrixColumn(_Rt, 2);
   _p0.copy(c).addScaledVector(_n, SLICE.depth);
+  return r;
+}
+// per frame: place the live plane; atoms inside it get a halo; saved planes follow their map's level
+function sliceFrame() {
+  for (const pl of S.planes) {
+    pl.mesh.visible = pl.visible;
+    pl.mesh.material.uniforms.uLevel.value = pl.map.level;
+  }
+  if (!SLICE.mesh || !SLICE.mesh.visible) return;
+  const r = livePlacement();
+  SLICE.mesh.matrix.copy(_M);
+  SLICE.mesh.matrixWorldNeedsUpdate = true;
   const u = SLICE.mesh.material.uniforms;
+  u.uPlane.value.copy(_M);
   u.uNormal.value.copy(_n).normalize();
   u.uThick.value = SLICE.thick;
-  const half = Math.max(0.5, SLICE.thick / 2);   // halo for atoms inside the slice
+  const half = Math.max(0.5, SLICE.thick / 2);
   let k = 0;
   for (const mol of S.mols) {
     if (!mol.group.visible) continue;
@@ -639,6 +652,91 @@ function sliceFrame() {
   }
   SLICE.halo.count = k;
   SLICE.halo.instanceMatrix.needsUpdate = true;
+}
+
+// ------------------------------------------------------------ saved planes
+// A saved plane stays in the molecule with its own outline colour and is shown in every map style; the live
+// plane is free for the next one. Each viewer's planes are kept in this browser between visits.
+const PLANE_COLORS = [0x4fd0ff, 0xff6bd6, 0xffa64d, 0xa0ff70, 0xffffff, 0xb59cff];
+const PLANE_KEY = "moorlight-share-planes";
+let planeCount = 0;
+function addSavedPlane(pl) {
+  pl.mesh = makePlaneMesh(pl.color);
+  const M = new THREE.Matrix4().makeTranslation(pl.p0.x, pl.p0.y, pl.p0.z).multiply(pl.Rt)
+    .multiply(new THREE.Matrix4().makeScale(pl.r, pl.r, 1));
+  pl.mesh.matrix.copy(M);
+  pl.mesh.matrixWorldNeedsUpdate = true;
+  const u = pl.mesh.material.uniforms;
+  u.uPlane.value.copy(M);
+  setPlaneMap(u, pl.map);
+  u.uNormal.value.setFromMatrixColumn(pl.Rt, 2).normalize();
+  u.uThick.value = pl.thick;
+  S.planes.push(pl);
+}
+function savePlane() {
+  if (S.style !== "slice" || !SLICE.mesh || !SLICE.mesh.visible) { status("Switch to Slice and place the plane first."); return; }
+  const r = livePlacement();
+  planeCount += 1;
+  addSavedPlane({ name: `Plane ${planeCount}`, color: PLANE_COLORS[(planeCount - 1) % PLANE_COLORS.length],
+    p0: _p0.clone(), Rt: _Rt.clone(), r, thick: SLICE.thick, map: SLICE.map, visible: true });
+  renderPlaneList(); storePlanes(); redraw();
+  status(`Plane ${planeCount} saved. Move the live plane to place the next one.`);
+}
+function removePlane(i) {
+  const [pl] = S.planes.splice(i, 1);
+  world.remove(pl.mesh);
+  pl.mesh.geometry.dispose();
+  renderPlaneList(); storePlanes(); redraw();
+}
+function editPlane(i) {        // the saved plane becomes the live one again
+  const pl = S.planes[i];
+  removePlane(i);
+  if (S.style !== "slice") setStyle("slice");
+  SLICE.lock = { c: pl.p0.clone(), Rt: pl.Rt.clone() };
+  for (const b of [$("#slice-lock"), $("#mini-lock")]) { b.setAttribute("aria-pressed", "true"); b.textContent = "Release"; }
+  setTilt("tiltX", 0); setTilt("tiltY", 0); setSliceDepth(0); setThickness(pl.thick);
+  status(`${pl.name} is the live plane again.`);
+}
+function renderPlaneList() {
+  const ul = $("#plane-list");
+  ul.innerHTML = "";
+  S.planes.forEach((pl, i) => {
+    const li = document.createElement("li");
+    li.className = "plane";
+    const chip = "#" + pl.color.toString(16).padStart(6, "0");
+    li.innerHTML = `<input type="checkbox" id="plane-vis-${i}"><label for="plane-vis-${i}"><span class="chip" ` +
+      `style="border-color:${chip}" aria-hidden="true"></span><span class="name"></span></label>` +
+      `<button type="button">Edit</button><button type="button" aria-label="Delete">&times;</button>`;
+    li.querySelector(".name").textContent = `${pl.name} · ${pl.map.info.name}${pl.thick ? ` · ${pl.thick.toFixed(1)} Å` : ""}`;
+    const cb = li.querySelector("input");
+    cb.checked = pl.visible;
+    cb.addEventListener("change", () => { pl.visible = cb.checked; storePlanes(); redraw(); });
+    const [edit, del] = li.querySelectorAll("button");
+    edit.addEventListener("click", () => editPlane(i));
+    del.setAttribute("aria-label", `Delete ${pl.name}`);
+    del.addEventListener("click", () => removePlane(i));
+    ul.appendChild(li);
+  });
+  $("#plane-list").hidden = !S.planes.length;
+}
+function storePlanes() {
+  try {
+    localStorage.setItem(PLANE_KEY, JSON.stringify({ count: planeCount, planes: S.planes.map((pl) => ({ name: pl.name,
+      color: pl.color, p0: pl.p0.toArray(), Rt: pl.Rt.toArray(), r: pl.r, thick: pl.thick, map: pl.map.info.name,
+      visible: pl.visible })) }));
+  } catch (err) { /* storage blocked */ }
+}
+function loadPlanes() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(PLANE_KEY) || "null"); } catch (err) { saved = null; }
+  if (!saved || !Array.isArray(saved.planes)) return;
+  planeCount = saved.count || 0;
+  for (const p of saved.planes) {
+    const map = S.maps.find((m) => m.info.name === p.map);
+    if (!map) continue;
+    addSavedPlane({ name: p.name, color: p.color, p0: new THREE.Vector3(...p.p0), Rt: new THREE.Matrix4().fromArray(p.Rt),
+      r: p.r, thick: p.thick, map, visible: p.visible !== false });
+  }
 }
 function setTilt(axis, deg) {
   SLICE[axis] = Math.max(-90, Math.min(90, deg));
@@ -1050,6 +1148,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "f" || e.key === "F") setFull(!$("#app").classList.contains("full"));
   else if ((e.key === "l" || e.key === "L") && S.style === "slice") setSliceLock(!SLICE.lock);
   else if (e.key === "a" || e.key === "A") toggleStructure();
+  else if ((e.key === "s" || e.key === "S") && S.style === "slice") savePlane();
 });
 
 document.querySelectorAll("#style-row button").forEach((b) => b.addEventListener("click", () => setStyle(b.dataset.style)));
@@ -1065,6 +1164,7 @@ $("#slice-tilt-x").addEventListener("input", (e) => setTilt("tiltX", +e.target.v
 $("#slice-tilt-y").addEventListener("input", (e) => setTilt("tiltY", +e.target.value));
 $("#slice-face").addEventListener("click", faceMe);
 $("#slice-thick").addEventListener("input", (e) => setThickness(+e.target.value));
+for (const b of [$("#slice-save"), $("#mini-save")]) b.addEventListener("click", savePlane);
 $("#slice-atoms").addEventListener("click", planeThroughLabels);
 $("#mini-atoms").addEventListener("click", toggleStructure);
 $("#prev").addEventListener("click", () => applyStop(S.stop - 1));
@@ -1128,6 +1228,8 @@ async function start() {
   renderMapList();
   renderModelList();
   renderViewList();
+  loadPlanes();
+  renderPlaneList();
   const h = /^#stop-(\d+)$/.exec(location.hash || "");
   applyStop(h ? parseInt(h[1], 10) - 1 : (DATA.stops.length ? 0 : -1));
 }
