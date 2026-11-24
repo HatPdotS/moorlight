@@ -1180,11 +1180,11 @@ function endPointer(e) {
 }
 el.addEventListener("pointerup", endPointer);
 el.addEventListener("pointercancel", endPointer);
-el.addEventListener("wheel", (e) => {
+el.addEventListener("wheel", (e) => {   // two-finger scroll (or the wheel) pans like a page; pinch arrives as Ctrl+wheel
   e.preventDefault();
   if (e.ctrlKey) { S.zoom = Math.min(400, Math.max(2, S.zoom * Math.exp(e.deltaY * 0.01))); redraw(); return; }
-  const m = S.maps.find((x) => x.visible);
-  if (m) changeLevel(m, (e.shiftKey ? 0.5 : 0.1) * (e.deltaY > 0 ? -1 : 1));
+  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1;
+  pan(-e.deltaX * unit, -e.deltaY * unit);
 }, { passive: false });
 window.addEventListener("keydown", (e) => {
   if (e.target.closest && e.target.closest("input, select")) return;
