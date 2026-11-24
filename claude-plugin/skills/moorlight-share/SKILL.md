@@ -12,7 +12,7 @@ description: Make a self-contained, phone-friendly viewer page for a structure a
 - preset slice planes.
 
 The browser draws everything itself:
-- contours, as marching-cubes mesh (Coot's chicken wire) or shaded surfaces;
+- contours, as marching-cubes mesh (Coot's chicken wire);
 - Olex2-style map slices.
 
 On the page the viewer can rotate, zoom and pan, switch maps and set their levels with sliders, and tap atoms for
@@ -194,19 +194,22 @@ and scipy). There is no server and no port.
 ## The page
 
 - **Maps:** visibility and a log-scale level slider for each map.
-- **Maps drawn as:** Mesh, Surface or Slice. In slice mode:
+- **Maps drawn as:** Mesh or Slice. Switching or changing maps never changes this mode. Slice mode shows slices
+  only (no contours), of the map in use (the first visible), and no slices at all when every map is off. In slice mode:
   - the live plane (yellow outline) faces the viewer and turns with the molecule until it is fixed;
   - sliders for depth, thickness and two tilts;
   - buttons: Fix plane, Through labelled atoms (best plane through three or more tapped atoms), Face me, and
     Save plane (S).
-- **Planes:** the preset planes and the viewer's own saved ones, each with its outline colour.
+- **Planes:** the preset planes and the viewer's own saved ones, each with its outline colour. They are drawn only
+  in slice mode, with the map in use at its level.
   - Tap a name to look at that plane, centred and face-on.
   - The checkbox hides it.
   - Copy adds a parallel plane at the copy offset (slider, −5 to +5 Å).
   - Edit makes it the live plane; × removes it.
   - The viewer's own planes and copies are kept in their browser. Presets come with the page.
-- **Structure:** a checkbox for each model and for the neighbouring cells, plus hydrogens, clear labels and Reset
-  view.
+- **Structure:** a checkbox for each model and for the neighbouring cells, plus hydrogens, Hide in front (residues
+  in front of the centre residue that cover it are hidden with their density; on by default, key C), clear labels
+  and Reset view.
 - **Depth bar** (right edge of the view): the structure from front (top) to back.
   - Its window is the layer you see. Drag it to look deeper; drag its ends to make the layer thinner or thicker;
     tap the bar to jump.

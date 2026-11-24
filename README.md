@@ -98,7 +98,7 @@ the same rules.
 
 `moorlight-share` (or `moorlight share`) writes one self-contained HTML viewer page. It runs on a phone, as a
 claude.ai artifact, or as a file opened locally. The page holds the models, their symmetry neighbours, the maps on
-their own grids, and preset slice planes. The browser contours the maps itself (mesh, surface, or an Olex2-style slice).
+their own grids, and preset slice planes. The browser contours the maps itself (mesh, or an Olex2-style slice).
 
 ```
 moorlight-share init model.pdb maps.mtz -o spec.json --plane "Ligand=A/401" --build page.html

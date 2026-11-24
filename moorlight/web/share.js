@@ -1,5 +1,5 @@
 // Moorlight share page: a read-only viewer for a snapshot written by `moorlight share`.
-// Models, map boxes and tour stops are embedded in the page; maps are contoured here (surface nets),
+// Models, map boxes and preset planes are embedded in the page; maps are contoured here (marching cubes),
 // so no server is needed. Drawing follows the main viewer (app.js): Coot colours, sticks, chicken wire.
 import * as THREE from "three";
 import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
@@ -27,7 +27,7 @@ const S = {
   labels: new Map(),   // "mol:idx" -> div
   distances: [],
   radius: DATA.contour_radius || 10,
-  style: "mesh",       // mesh | surface | slice
+  style: "mesh",       // mesh | slice
   planes: [],          // saved slice planes
   depth: 0,            // where the visible slab sits along the view axis, Å from the rotation centre (+: towards you)
 };
@@ -407,7 +407,7 @@ function valueAt(m, p) {
 }
 
 // Marching cubes (three.js tables): vertices where the contour crosses grid edges, shared between neighbouring
-// cells. Mesh style draws the triangle edges (Coot's chicken wire), surface style the shaded triangles.
+// cells. The page draws the triangle edges (Coot's chicken wire).
 const MC_CORNER = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]];
 const MC_EDGE = [[0, 0, 0, 0], [1, 0, 0, 1], [0, 1, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0], [1, 0, 1, 1],
   [0, 1, 1, 0], [0, 0, 1, 1], [0, 0, 0, 2], [1, 0, 0, 2], [1, 1, 0, 2], [0, 1, 0, 2]];   // start point, axis
@@ -487,10 +487,6 @@ function marchingCubes(m, c, r, level, sign, wire) {
 }
 
 const mapColor = (m, sign) => (m.info.kind === "diff" ? (sign > 0 ? CONTOUR.pos : CONTOUR.neg) : (m.info.color || CONTOUR.map));
-function surfaceMat(color) {
-  return new THREE.MeshPhongMaterial({ color, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false,
-    shininess: 40, specular: 0x333333 });
-}
 function clearMapObj(m) {
   for (const ch of [...m.obj.children]) { m.obj.remove(ch); ch.geometry.dispose(); }
 }
@@ -504,13 +500,11 @@ function contourCenter() { return S.center.clone().addScaledVector(viewAxis(), S
 function contourMap(m) {
   const cc = contourCenter();
   const c = cc.toArray();
-  const surface = S.style === "surface";
-  m.style = S.style === "slice" ? "mesh" : S.style;
   m.raw = [];
   for (const sign of m.info.kind === "diff" ? [1, -1] : [1]) {
-    m.raw.push({ sign, surface, mc: marchingCubes(m, c, S.radius, m.level, sign, !surface), own: null });
+    m.raw.push({ sign, mc: marchingCubes(m, c, S.radius, m.level, sign, true), own: null });
   }
-  m.drawn = { center: cc, level: m.level, style: m.style, radius: S.radius };
+  m.drawn = { center: cc, level: m.level, radius: S.radius };
   drawMap(m);
 }
 // the contour, less the density of residues hidden by Hide in front
@@ -521,42 +515,23 @@ function drawMap(m) {
   for (const r of m.raw || []) {
     const k = r.sign > 0 ? 0 : 1, mc = r.mc;
     if (hide.size && !r.own) r.own = contourOwners(r);
-    if (r.surface) {
-      const index = hide.size ? mc.index.filter((_, t) => !hide.has(r.own[(t / 3) | 0])) : mc.index;
-      if (!index.length) continue;
-      const g = new THREE.BufferGeometry();
-      g.setAttribute("position", new THREE.BufferAttribute(mc.verts, 3));
-      g.setIndex(new THREE.BufferAttribute(index, 1));
-      g.computeVertexNormals();
-      m.obj.add(new THREE.Mesh(g, m.smats[k] || (m.smats[k] = surfaceMat(mapColor(m, r.sign)))));
-    } else {
-      let seg = mc.segments;
-      if (hide.size) {
-        const out = new Float32Array(seg.length);
-        let w = 0;
-        for (let s = 0; s < r.own.length; s++) if (!hide.has(r.own[s])) { out.set(seg.subarray(6*s, 6*s + 6), w); w += 6; }
-        seg = out.slice(0, w);
-      }
-      if (!seg.length) continue;
-      const g = new LineSegmentsGeometry();
-      g.setPositions(seg);
-      m.obj.add(new LineSegments2(g, m.mats[k] || (m.mats[k] = lineMat(1.1, { color: mapColor(m, r.sign) }))));
+    let seg = mc.segments;
+    if (hide.size) {
+      const out = new Float32Array(seg.length);
+      let w = 0;
+      for (let s = 0; s < r.own.length; s++) if (!hide.has(r.own[s])) { out.set(seg.subarray(6*s, 6*s + 6), w); w += 6; }
+      seg = out.slice(0, w);
     }
+    if (!seg.length) continue;
+    const g = new LineSegmentsGeometry();
+    g.setPositions(seg);
+    m.obj.add(new LineSegments2(g, m.mats[k] || (m.mats[k] = lineMat(1.1, { color: mapColor(m, r.sign) }))));
   }
   redraw();
 }
-// the residue each triangle (surface) or line (mesh) belongs to, by its middle
+// the residue each contour line belongs to, by its middle
 function contourOwners(r) {
-  const mc = r.mc;
-  if (r.surface) {
-    const v = mc.verts, ix = mc.index, own = new Int32Array(ix.length / 3);
-    for (let t = 0; t < own.length; t++) {
-      const a = 3 * ix[3*t], b = 3 * ix[3*t+1], c = 3 * ix[3*t+2];
-      own[t] = ownerAt((v[a] + v[b] + v[c]) / 3, (v[a+1] + v[b+1] + v[c+1]) / 3, (v[a+2] + v[b+2] + v[c+2]) / 3);
-    }
-    return own;
-  }
-  const s = mc.segments, own = new Int32Array(s.length / 6);
+  const s = r.mc.segments, own = new Int32Array(s.length / 6);
   for (let n = 0; n < own.length; n++) own[n] = ownerAt((s[6*n] + s[6*n+3]) / 2, (s[6*n+1] + s[6*n+4]) / 2, (s[6*n+2] + s[6*n+5]) / 2);
   return own;
 }
@@ -564,13 +539,12 @@ let contourTimer = null;
 function scheduleContour(now = false) {
   clearTimeout(contourTimer);
   contourTimer = setTimeout(() => {
-    const sliced = S.style === "slice" ? activeMap() : null;
+    const slicing = S.style === "slice";     // slice mode draws slices only, never contours
     for (const m of S.maps) {
-      m.obj.visible = m.visible && m !== sliced;
-      if (!m.visible || m === sliced) continue;
+      m.obj.visible = m.visible && !slicing;
+      if (!m.visible || slicing) continue;
       const d = m.drawn;
-      const want = S.style === "slice" ? "mesh" : S.style;
-      if (d && d.center.distanceTo(contourCenter()) < 0.5 && d.level === m.level && d.style === want && d.radius === S.radius) {
+      if (d && d.center.distanceTo(contourCenter()) < 0.5 && d.level === m.level && d.radius === S.radius) {
         if (m.stale) drawMap(m);
         continue;
       }
@@ -725,12 +699,13 @@ function livePlacement() {
   return r;
 }
 // per frame: place the live plane; atoms inside it get a halo; saved planes show the map in use (the first visible
-// one; their own map when none is shown) at its level
+// one) at its level, in slice mode only and not at all when no map is shown
 function sliceFrame() {
-  const shown = activeMap();
+  const m = activeMap();
   for (const pl of S.planes) {
-    pl.mesh.visible = pl.visible;
-    const m = shown || pl.map, u = pl.mesh.material.uniforms;
+    pl.mesh.visible = pl.visible && S.style === "slice" && !!m;
+    if (!pl.mesh.visible) continue;
+    const u = pl.mesh.material.uniforms;
     if (pl.shown !== m) { setPlaneMap(u, m); pl.shown = m; }
     u.uLevel.value = m === pl.map && pl.level != null ? pl.level : m.level;
   }
@@ -805,14 +780,14 @@ function loadPresetPlanes() {
 }
 // turn the view onto a saved plane: centred on it, facing it
 function goToPlane(i) {
-  const pl = S.planes[i], m = activeMap() || pl.map;
+  const pl = S.planes[i], m = activeMap();
   pl.visible = true;
   // a preset made on the map in use brings its level along, so the plane, contours and slider agree
   if (pl.level != null && m === pl.map) setLevel(m, pl.level);
   renderPlaneList();
   S.depth = 0;
   animateTo(pl.p0.clone(), new THREE.Quaternion().setFromRotationMatrix(pl.Rt.clone().transpose()));
-  status(`${pl.name}: ${m.info.name} at ${fmtLevel(m)}`);
+  status(`${pl.name}${m ? `: ${m.info.name} at ${fmtLevel(m)}` : ": no map shown"}${S.style === "slice" ? "" : " (planes show in Slice)"}`);
 }
 // a parallel copy of a plane, moved along its normal by the copy offset; it belongs to the viewer
 function copyPlane(i) {
@@ -1426,7 +1401,7 @@ window.addEventListener("keydown", (e) => {
 document.querySelectorAll("#style-row button").forEach((b) => b.addEventListener("click", () => setStyle(b.dataset.style)));
 try {
   const st = localStorage.getItem("moorlight-share-style");
-  if (st === "surface" || st === "slice") S.style = st;
+  if (st === "slice") S.style = st;
 } catch (err) { /* storage blocked */ }
 document.querySelectorAll("#style-row button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.style === S.style)));
 $("#app").classList.toggle("slicing", S.style === "slice");
@@ -1576,7 +1551,7 @@ async function start() {
   } else {
     for (const info of DATA.maps) {
       const m = { info, values: await decodeMap(info), visible: info.visible, level: info.level, kind: info.kind,
-        obj: new THREE.Group(), mats: [], smats: [], drawn: null, vol: null, tex: null };
+        obj: new THREE.Group(), mats: [], drawn: null, vol: null, tex: null };
       let mx = 0;
       for (const v of m.values) { const a = Math.abs(toLevelUnits(m, v)); if (a > mx) mx = a; }
       m.maxAbs = mx;
