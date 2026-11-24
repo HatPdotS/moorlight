@@ -115,7 +115,7 @@ input[type=range] { width: 100%; min-width: 0; height: 32px; margin: 0; accent-c
 .view-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .seg button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 .slice-box { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
-.ctl-row { display: grid; grid-template-columns: 4.2em minmax(0, 1fr) 4.2em; align-items: center; gap: 8px; }
+.ctl-row { display: grid; grid-template-columns: 4.8em minmax(0, 1fr) 4.2em; align-items: center; gap: 8px; }
 .ctl-row label { font-size: 0.85rem; color: var(--muted); }
 .ctl-row output { text-align: right; font: 0.85rem var(--font-data); font-variant-numeric: tabular-nums; }
 .views-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 6px; }
@@ -201,6 +201,11 @@ kbd { font: 0.8rem var(--font-data); }
           <output id="slice-depth-out" for="slice-depth">+0.0 Å</output>
         </div>
         <div class="ctl-row">
+          <label for="slice-thick">Thickness</label>
+          <input type="range" id="slice-thick" min="0" max="4" step="0.1" value="0">
+          <output id="slice-thick-out" for="slice-thick">thin</output>
+        </div>
+        <div class="ctl-row">
           <label for="slice-tilt-x">Tilt &#8597;</label>
           <input type="range" id="slice-tilt-x" min="-90" max="90" step="1" value="0">
           <output id="slice-tilt-x-out" for="slice-tilt-x">0°</output>
@@ -247,7 +252,8 @@ kbd { font: 0.8rem var(--font-data); }
         pans, the wheel changes the level of the first visible map, <kbd>&larr;</kbd> <kbd>&rarr;</kbd> step through
         the saved views, <kbd>F</kbd> shows the view alone, <kbd>A</kbd> hides the structure, <kbd>L</kbd> fixes the
         slice. The slice faces you and turns with the molecule until you fix it; tilt it with the two angle sliders,
-        or label three or more atoms and put it through them.</p>
+        or label three or more atoms and put it through them. A thick slice shows the strongest value within the
+        thickness, so features just off the plane appear as well.</p>
     </details>
   </section>
 </div>

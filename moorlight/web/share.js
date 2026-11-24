@@ -491,7 +491,7 @@ function scheduleContour(now = false) {
 // molecule), at an adjustable depth. It shows the active map (the first visible one): green +, red - (blue for
 // 2mFo-DFc-like maps), stronger towards 3 x level, with contour lines at 1, 2, 4, 8 ... x level. The plane is dark
 // glass: atoms behind it are dimmed, atoms in front stay bright.
-const SLICE = { mesh: null, halo: null, map: null, failed: false, depth: 0, tiltX: 0, tiltY: 0, lock: null };   // lock: {c, Rt}
+const SLICE = { mesh: null, halo: null, map: null, failed: false, depth: 0, tiltX: 0, tiltY: 0, thick: 0, lock: null };   // lock: {c, Rt}
 const SLICE_VS = `
 uniform mat4 uPlane;
 varying vec3 vModel;
@@ -506,14 +506,24 @@ precision highp float;
 precision highp sampler3D;
 uniform sampler3D uMap;
 uniform mat3 uGinv;
-uniform vec3 uOrigin, uN, uPos, uNeg;
-uniform float uLevel;
+uniform vec3 uOrigin, uN, uPos, uNeg, uNormal;
+uniform float uLevel, uThick;
 uniform int uSigned;
 varying vec3 vModel;
 varying vec2 vXY;
+float sampleAt(vec3 p) {
+  vec3 idx = uGinv * (p - uOrigin);
+  return texture(uMap, (idx.zyx + 0.5) / uN.zyx).r;
+}
 void main() {
-  vec3 idx = uGinv * (vModel - uOrigin);
-  float v = texture(uMap, (idx.zyx + 0.5) / uN.zyx).r;
+  // thin plane: the value on it; thick slice: the strongest value (sign kept) within +/- uThick / 2 of it
+  float v = sampleAt(vModel);
+  if (uThick > 0.01) {
+    for (int s = 0; s < 13; s++) {
+      float w = sampleAt(vModel + uNormal * uThick * (float(s) / 12.0 - 0.5));
+      if (uSigned == 0 ? w > v : abs(w) > abs(v)) v = w;
+    }
+  }
   float a = (uSigned == 0 && v < 0.0) ? 0.0 : abs(v);
   vec3 hue = v >= 0.0 ? uPos : uNeg;
   float k = clamp(a / (3.0 * uLevel), 0.0, 1.0);
@@ -555,6 +565,7 @@ function updateSlice() {
         uMap: { value: null }, uPlane: { value: new THREE.Matrix4() }, uGinv: { value: new THREE.Matrix3() },
         uOrigin: { value: new THREE.Vector3() }, uN: { value: new THREE.Vector3() }, uPos: { value: new THREE.Color() },
         uNeg: { value: new THREE.Color() }, uLevel: { value: 1 }, uSigned: { value: 1 },
+        uNormal: { value: new THREE.Vector3(0, 0, 1) }, uThick: { value: 0 },
       },
     });
     // unit square; its matrix (in model coordinates) places, turns and sizes it every frame
@@ -609,6 +620,10 @@ function sliceFrame() {
   SLICE.mesh.material.uniforms.uPlane.value.copy(_M);
   _ex.setFromMatrixColumn(_Rt, 0); _ey.setFromMatrixColumn(_Rt, 1); _n.setFromMatrixColumn(_Rt, 2);
   _p0.copy(c).addScaledVector(_n, SLICE.depth);
+  const u = SLICE.mesh.material.uniforms;
+  u.uNormal.value.copy(_n).normalize();
+  u.uThick.value = SLICE.thick;
+  const half = Math.max(0.5, SLICE.thick / 2);   // halo for atoms inside the slice
   let k = 0;
   for (const mol of S.mols) {
     if (!mol.group.visible) continue;
@@ -616,7 +631,7 @@ function sliceFrame() {
     for (let i = 0; i < el.length; i++) {
       if (el[i] === "H") continue;
       const dx = x[3*i] - _p0.x, dy = x[3*i+1] - _p0.y, dz = x[3*i+2] - _p0.z;
-      if (Math.abs(dx * _n.x + dy * _n.y + dz * _n.z) > 0.5) continue;
+      if (Math.abs(dx * _n.x + dy * _n.y + dz * _n.z) > half) continue;
       if (Math.abs(dx * _ex.x + dy * _ex.y + dz * _ex.z) > r || Math.abs(dx * _ey.x + dy * _ey.y + dz * _ey.z) > r) continue;
       _m.compose(_v.set(x[3*i], x[3*i+1], x[3*i+2]), _q.identity(), _s.set(0.42, 0.42, 0.42));
       SLICE.halo.setMatrixAt(k++, _m);
@@ -630,6 +645,12 @@ function setTilt(axis, deg) {
   const id = axis === "tiltX" ? "slice-tilt-x" : "slice-tilt-y";
   $(`#${id}`).value = String(SLICE[axis]);
   $(`#${id}-out`).textContent = `${Math.round(SLICE[axis])}°`;
+  redraw();
+}
+function setThickness(t) {
+  SLICE.thick = Math.max(0, Math.min(4, t));
+  $("#slice-thick").value = String(SLICE.thick);
+  $("#slice-thick-out").textContent = SLICE.thick ? `${SLICE.thick.toFixed(1)} Å` : "thin";
   redraw();
 }
 function faceMe() {
@@ -1043,6 +1064,7 @@ for (const b of [$("#slice-lock"), $("#mini-lock")]) b.addEventListener("click",
 $("#slice-tilt-x").addEventListener("input", (e) => setTilt("tiltX", +e.target.value));
 $("#slice-tilt-y").addEventListener("input", (e) => setTilt("tiltY", +e.target.value));
 $("#slice-face").addEventListener("click", faceMe);
+$("#slice-thick").addEventListener("input", (e) => setThickness(+e.target.value));
 $("#slice-atoms").addEventListener("click", planeThroughLabels);
 $("#mini-atoms").addEventListener("click", toggleStructure);
 $("#prev").addEventListener("click", () => applyStop(S.stop - 1));
