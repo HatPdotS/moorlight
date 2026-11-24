@@ -104,6 +104,8 @@ function carbonColor(k) {
   return own ? new THREE.Color(own).getHex() : CARBON_BY_MOL[k % CARBON_BY_MOL.length];
 }
 function elColor(el, k) {
+  const mono = S.mols[k]?.data.mono;
+  if (mono) return carbonColor(k);
   el = (el || "").toUpperCase();
   if (el === "C") return carbonColor(k);
   return ELEMENT_COLORS[el] ?? 0xff40ff;
@@ -228,7 +230,7 @@ function stickMeshes(mol, k, keep, lone) {
 
 function atomLabel(k, i) {
   const a = S.mols[k].data.atoms[i];
-  return `${a[3]}${a[1]}${a[2]} ${a[4]}${a[5] ? ":" + a[5] : ""}`;
+  return `${a[3]}${a[1]}${a[2]} ${a[4]}${a[5] ? ":" + a[5] : ""}${a[9] ? " [" + a[9] + "]" : ""}`;
 }
 function atomInfo(k, i) {
   const a = S.mols[k].data.atoms[i], x = S.mols[k].xyz;
@@ -328,18 +330,24 @@ const unit = (m) => (m.info.units === "sigma" ? "σ" : (m.info.unit_label ? " " 
 // map value in the units the level is given in (σ of the whole map, or the map's own units)
 const toLevelUnits = (m, v) => (m.info.units === "sigma" ? (v - m.info.mean) / m.info.rms : v);
 
+// Stored grids: position = origin + G (i, j, k). "native" maps are the map's own grid over the unit cell
+// (periodic, wrap); "box" maps are resampled on an orthogonal box.
+const mat3 = (M, v) => [M[0]*v[0] + M[1]*v[1] + M[2]*v[2], M[3]*v[0] + M[4]*v[1] + M[5]*v[2], M[6]*v[0] + M[7]*v[1] + M[8]*v[2]];
+const wrapIndex = (g, n) => ((g % n) + n) % n;
+
 function valueAt(m, p) {
-  const { n, origin: o, step } = m.info;
-  const f = [0, 1, 2].map((a) => (p[a] - o[a]) / step);
-  if (f.some((v, a) => v < 0 || v > n[a] - 1)) return NaN;
-  const i = f.map((v, a) => Math.min(n[a] - 2, Math.floor(v)));
+  const { n, origin: o, Ginv, wrap } = m.info;
+  const f = mat3(Ginv, [p[0] - o[0], p[1] - o[1], p[2] - o[2]]);
+  if (!wrap && f.some((v, a) => v < 0 || v > n[a] - 1)) return NaN;
+  const i = f.map((v, a) => (wrap ? Math.floor(v) : Math.min(n[a] - 2, Math.floor(v))));
   const t = f.map((v, a) => v - i[a]);
+  const g = (a, d) => (wrap ? wrapIndex(i[a] + d, n[a]) : i[a] + d);
   const D = m.values, syz = n[1] * n[2];
   let s = 0;
   for (let c = 0; c < 8; c++) {
     const dx = c & 1, dy = (c >> 1) & 1, dz = (c >> 2) & 1;
     const w = (dx ? t[0] : 1 - t[0]) * (dy ? t[1] : 1 - t[1]) * (dz ? t[2] : 1 - t[2]);
-    s += w * D[(i[0] + dx) * syz + (i[1] + dy) * n[2] + (i[2] + dz)];
+    s += w * D[g(0, dx) * syz + g(1, dy) * n[2] + g(2, dz)];
   }
   return toLevelUnits(m, s);
 }
@@ -352,42 +360,59 @@ for (let a = 0; a < 8; a++) for (const bit of [1, 2, 4]) if (!(a & bit)) CUBE_ED
 const FACE = [0xaa, 0xcc, 0xf0];   // corners on the +x, +y, +z face of a cell
 
 function surfaceNet(m, c, r, level, sign) {
-  const { n, origin: o, step } = m.info;
-  const D = m.values, syz = n[1] * n[2];
+  const { n, origin: o, G, Ginv, wrap } = m.info;
+  const D = m.values;
   const off = m.info.units === "sigma" ? m.info.mean : 0, scale = m.info.units === "sigma" ? m.info.rms : 1;
   const L = level * scale;
-  const lo = (a) => Math.max(0, Math.floor((c[a] - r - o[a]) / step));
-  const hi = (a) => Math.min(n[a] - 1, Math.ceil((c[a] + r - o[a]) / step));
-  const i0 = lo(0), i1 = hi(0), j0 = lo(1), j1 = hi(1), k0 = lo(2), k1 = hi(2);
-  const sx = i1 - i0, sy = j1 - j0, sz = k1 - k0;
+  // grid cells covering the cube c +/- r (a parallelepiped on a non-orthogonal grid); vertices outside the cube are
+  // dropped below, so the contour fills a box around the centre as in Coot
+  const ci = mat3(Ginv, [c[0] - o[0], c[1] - o[1], c[2] - o[2]]);
+  const lo = [], hi = [];
+  for (let a = 0; a < 3; a++) {
+    const ext = r * (Math.abs(Ginv[3*a]) + Math.abs(Ginv[3*a+1]) + Math.abs(Ginv[3*a+2]));
+    let l = Math.floor(ci[a] - ext), h = Math.ceil(ci[a] + ext);
+    if (!wrap) { l = Math.max(0, l); h = Math.min(n[a] - 1, h); }
+    lo.push(l); hi.push(h);
+  }
+  const sx = hi[0] - lo[0], sy = hi[1] - lo[1], sz = hi[2] - lo[2];
   if (sx <= 0 || sy <= 0 || sz <= 0) return new Float32Array(0);
+  // offset in the value array of each grid plane along each axis (wrapped on the periodic cell grid)
+  const stride = [n[1] * n[2], n[2], 1];
+  const [X, Y, Z] = [0, 1, 2].map((a) => {
+    const t = new Int32Array(hi[a] - lo[a] + 1);
+    for (let q = 0; q < t.length; q++) t[q] = (wrap ? wrapIndex(lo[a] + q, n[a]) : lo[a] + q) * stride[a];
+    return t;
+  });
+  const CX = CORNERS.map((q) => q[0]), CY = CORNERS.map((q) => q[1]), CZ = CORNERS.map((q) => q[2]);
   const vid = new Int32Array(sx * sy * sz).fill(-1);
   const masks = new Uint8Array(sx * sy * sz);
   const verts = [];
   const val = new Float64Array(8);
-  const cornerOff = CORNERS.map(([a, b, d]) => a * syz + b * n[2] + d);
-  for (let i = i0; i < i1; i++) for (let j = j0; j < j1; j++) {
-    let base = i * syz + j * n[2] + k0;
-    let cell = ((i - i0) * sy + (j - j0)) * sz;
-    for (let k = k0; k < k1; k++, base++, cell++) {
+  for (let a = 0; a < sx; a++) for (let b = 0; b < sy; b++) {
+    let cell = (a * sy + b) * sz;
+    for (let d = 0; d < sz; d++, cell++) {
       let mask = 0;
       for (let q = 0; q < 8; q++) {
-        const v = sign * (D[base + cornerOff[q]] - off);
+        const v = sign * (D[X[a + CX[q]] + Y[b + CY[q]] + Z[d + CZ[q]]] - off);
         val[q] = v;
         if (v > L) mask |= 1 << q;
       }
       if (mask === 0 || mask === 255) continue;
       let ax = 0, ay = 0, az = 0, cnt = 0;
-      for (const [a, b] of CUBE_EDGES) {
-        if (((mask >> a) & 1) === ((mask >> b) & 1)) continue;
-        const t = (L - val[a]) / (val[b] - val[a]);
-        const A = CORNERS[a], B = CORNERS[b];
-        ax += A[0] + t * (B[0] - A[0]); ay += A[1] + t * (B[1] - A[1]); az += A[2] + t * (B[2] - A[2]);
+      for (const [p, q] of CUBE_EDGES) {
+        if (((mask >> p) & 1) === ((mask >> q) & 1)) continue;
+        const t = (L - val[p]) / (val[q] - val[p]);
+        ax += CX[p] + t * (CX[q] - CX[p]); ay += CY[p] + t * (CY[q] - CY[p]); az += CZ[p] + t * (CZ[q] - CZ[p]);
         cnt++;
       }
+      const fi = lo[0] + a + ax / cnt, fj = lo[1] + b + ay / cnt, fk = lo[2] + d + az / cnt;
+      const px = o[0] + G[0]*fi + G[1]*fj + G[2]*fk;
+      const py = o[1] + G[3]*fi + G[4]*fj + G[5]*fk;
+      const pz = o[2] + G[6]*fi + G[7]*fj + G[8]*fk;
+      if (Math.abs(px - c[0]) > r || Math.abs(py - c[1]) > r || Math.abs(pz - c[2]) > r) continue;
       vid[cell] = verts.length / 3;
       masks[cell] = mask;
-      verts.push(o[0] + step * (i + ax / cnt), o[1] + step * (j + ay / cnt), o[2] + step * (k + az / cnt));
+      verts.push(px, py, pz);
     }
   }
   const seg = [];
@@ -519,6 +544,8 @@ function applyStop(k) {
   clearLabels();
   for (const [mk, i] of s.labels || []) if (S.mols[mk - 1]) toggleLabel(mk - 1, i);
   for (const [a, b] of s.distances || []) addDistance([a[0] - 1, a[1]], [b[0] - 1, b[1]]);
+  S.radius = s.contour_radius || DATA.contour_radius || 10;
+  for (const m of S.maps) m.lastCenter = null;
   S.zoom = fitZoom(s.radius || 10);
   S.slab = s.slab || s.radius || 10;
   const q = s.orient ? new THREE.Quaternion(...s.orient) : null;
