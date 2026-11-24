@@ -1303,7 +1303,7 @@ function updateClear() {
 }
 function setClear(on) {
   CLEAR.on = on;
-  for (const b of [$("#front"), $("#view-front")]) b.setAttribute("aria-pressed", String(on));
+  $("#front").setAttribute("aria-pressed", String(on));
   try { localStorage.setItem("moorlight-share-front", on ? "1" : "0"); } catch (err) { /* storage blocked */ }
   redraw();
 }
@@ -1438,7 +1438,7 @@ $("#copy-offset").addEventListener("input", (e) => {
 for (const b of [$("#slice-save"), $("#mini-save")]) b.addEventListener("click", savePlane);
 $("#slice-atoms").addEventListener("click", planeThroughLabels);
 $("#mini-atoms").addEventListener("click", toggleStructure);
-for (const b of [$("#front"), $("#view-front")]) b.addEventListener("click", () => setClear(!CLEAR.on));
+$("#front").addEventListener("click", () => setClear(!CLEAR.on));
 try { if (localStorage.getItem("moorlight-share-front") === "0") setClear(false); } catch (err) { /* storage blocked */ }
 $("#reset").addEventListener("click", applyView);
 $("#clear").addEventListener("click", () => { clearLabels(); status(""); });
