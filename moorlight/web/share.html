@@ -71,6 +71,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 #fullscreen { top: 8px; right: max(8px, env(safe-area-inset-right, 0px)); min-width: 40px; min-height: 40px;
   display: grid; place-items: center; padding: 0; }
 #fullscreen svg { width: 20px; height: 20px; }
+#view-front { top: 8px; left: max(8px, env(safe-area-inset-left, 0px)); min-height: 40px; padding: 0 12px; font-size: 0.85rem; }
+#view-front[aria-pressed="true"], #front[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+#view-front[aria-pressed="false"], #front[aria-pressed="false"] { color: var(--muted); }
 #mini-nav { position: absolute; z-index: 2; left: 50%; transform: translateX(-50%);
   bottom: calc(8px + env(safe-area-inset-bottom, 0px)); display: none; align-items: center; gap: 6px;
   max-width: calc(100% - 24px); padding: 4px; border-radius: 10px; }
@@ -206,6 +209,8 @@ kbd { font: 0.8rem var(--font-data); }
     </div>
     <button id="fullscreen" class="fab" type="button" aria-pressed="false" aria-label="Full screen view"
       title="Full screen view (F)"></button>
+    <button id="view-front" class="fab" type="button" aria-pressed="true"
+      title="Hide residues in front of the one at the centre (C)">Hide in front</button>
     <div id="mini-level" class="fab" role="group" aria-label="Contour level">
       <span id="mini-level-name"></span>
       <input type="range" id="mini-level-range" min="0" max="1000" step="1">
@@ -221,7 +226,6 @@ kbd { font: 0.8rem var(--font-data); }
     </div>
     <div id="mini-nav" class="fab" role="group" aria-label="Structure">
       <button id="mini-atoms" type="button" aria-pressed="true" title="Show or hide the structure (A)">Atoms</button>
-      <button id="mini-front" type="button" aria-pressed="true" title="Hide residues in front of the one at the centre (C)">Hide in front</button>
     </div>
   </div>
   <section id="panel" aria-label="Viewer controls">
@@ -294,7 +298,7 @@ kbd { font: 0.8rem var(--font-data); }
         make the layer thinner or thicker, tap the bar to jump. The molecule keeps turning about the same point (the white
         dot on the bar); double-tap an atom to make it the rotation centre. Tap an atom for its label and the map values there;
         double-tap to centre on it. Residues in front of the one at the centre that cover it are hidden, with their
-        density; residues bonded to it stay. Hide in front (<kbd>C</kbd>) turns this off. Sliders set each map's contour level. On a trackpad, two-finger scrolling changes the level of the first visible
+        density; residues bonded to it stay. The Hide in front button at the top left (or <kbd>C</kbd>) turns this on and off. Sliders set each map's contour level. On a trackpad, two-finger scrolling changes the level of the first visible
         map, two-finger click and drag pans, pinching zooms. With a mouse, the wheel changes the level, right-drag or Shift-drag pans and
         Ctrl+wheel zooms. <kbd>F</kbd> shows the view alone, <kbd>,</kbd> <kbd>.</kbd> move in depth and
         <kbd>[</kbd> <kbd>]</kbd> change the slab, <kbd>A</kbd> hides the structure, <kbd>L</kbd> fixes the
