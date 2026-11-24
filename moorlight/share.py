@@ -437,8 +437,9 @@ class Share:
         self.planes = []
         for k, p in enumerate(spec.get("planes") or []):
             self.planes.append(self.plane(p, k))
+            base = self.planes[-1]["name"]
             for o in p.get("copies") or []:      # parallel copies at these offsets (Å) along the normal
-                name = f"{self.planes[-1]['name']} {o:+g} \u00c5"
+                name = f"{base} {o:+g} \u00c5"
                 self.planes.append(self.plane({**p, "name": name, "offset": float(p.get("offset", 0)) + float(o),
                                                "color": None}, k))
 
