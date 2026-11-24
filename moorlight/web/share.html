@@ -131,7 +131,11 @@ details[hidden] { display: none; }
 .mol .chip { flex: none; width: 14px; height: 14px; border-radius: 50%; }
 #mini-atoms[aria-pressed="false"] { color: var(--muted); }
 #plane-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.plane { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 8px; }
+.plane { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto; align-items: center; gap: 6px; }
+.plane .go { justify-self: stretch; text-align: left; min-width: 0; overflow-wrap: anywhere; font-size: 0.9rem;
+  background: transparent; border-color: transparent; padding: 0 4px; }
+.plane .go:hover { border-color: var(--line); }
+.hint { margin: 0; color: var(--muted); font-size: 0.85rem; }
 .plane input { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
 .plane label { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; }
 .plane .name { min-width: 0; overflow-wrap: anywhere; font-size: 0.9rem; }
@@ -182,10 +186,7 @@ kbd { font: 0.8rem var(--font-data); }
       <button id="mini-lock" type="button" aria-pressed="false" title="Fix the plane in the molecule (L)">Fix plane</button>
       <button id="mini-save" type="button" title="Keep this plane and place another (S)">Save</button>
     </div>
-    <div id="mini-nav" class="fab" role="group" aria-label="Saved views">
-      <button id="mini-prev" type="button" aria-label="Previous saved view">&#9664;</button>
-      <span id="mini-pos"></span>
-      <button id="mini-next" type="button" aria-label="Next saved view">&#9654;</button>
+    <div id="mini-nav" class="fab" role="group" aria-label="Structure">
       <button id="mini-atoms" type="button" aria-pressed="true" title="Show or hide the structure (A)">Atoms</button>
     </div>
   </div>
@@ -229,7 +230,11 @@ kbd { font: 0.8rem var(--font-data); }
           <button id="slice-save" type="button" title="Keep this plane and place another (S)">Save plane</button>
         </div>
       </div>
-      <ul id="plane-list" aria-label="Saved planes" hidden></ul>
+    </div>
+    <div>
+      <h3>Planes</h3>
+      <ul id="plane-list" aria-label="Planes" hidden></ul>
+      <p id="planes-empty" class="hint">No planes yet. Choose Slice, place the plane and save it.</p>
     </div>
     <div>
       <h3>Structure</h3>
@@ -239,31 +244,20 @@ kbd { font: 0.8rem var(--font-data); }
         <button id="clear" type="button">Clear labels</button>
         <button id="slab-down" type="button">Slab &minus;</button>
         <button id="slab-up" type="button">Slab +</button>
+        <button id="reset" type="button">Reset view</button>
       </div>
-    </div>
-    <div>
-      <h3>Saved views</h3>
-      <div class="views-row">
-        <button id="prev" type="button" aria-label="Previous saved view">&#9664;</button>
-        <select id="view-select" aria-label="Saved view"></select>
-        <button id="next" type="button" aria-label="Next saved view">&#9654;</button>
-        <button id="reset" type="button" title="Go back to this saved view">Reset</button>
-      </div>
-      <details id="note">
-        <summary>Note on this view</summary>
-        <div id="stop-text"></div>
-      </details>
     </div>
     <details class="help">
       <summary>Controls</summary>
       <p>Drag to rotate, pinch to zoom, move two fingers to pan. Tap an atom for its label and the map values there;
         double-tap to centre on it. Sliders set each map's contour level. With a mouse: right-drag zooms, Ctrl-drag
-        pans, the wheel changes the level of the first visible map, <kbd>&larr;</kbd> <kbd>&rarr;</kbd> step through
-        the saved views, <kbd>F</kbd> shows the view alone, <kbd>A</kbd> hides the structure, <kbd>L</kbd> fixes the
+        pans, the wheel changes the level of the first visible map, <kbd>F</kbd> shows the view alone, <kbd>A</kbd> hides the structure, <kbd>L</kbd> fixes the
         slice, <kbd>S</kbd> saves it. The slice faces you and turns with the molecule until you fix it; tilt it with the two angle sliders,
         or label three or more atoms and put it through them. A thick slice shows the strongest value within the
         thickness, so features just off the plane appear as well. Save plane keeps a plane in place (with its
-        own colour, in every map style) so you can place another; Edit makes a saved plane the live one again.</p>
+        own colour, in every map style) so you can place another. In the plane list, tap a name to look at that plane;
+        Edit makes it the live plane again. Planes marked "(yours)" are kept in this browser; the others come with the
+        page.</p>
     </details>
   </section>
 </div>

@@ -626,7 +626,7 @@ function livePlacement() {
 function sliceFrame() {
   for (const pl of S.planes) {
     pl.mesh.visible = pl.visible;
-    pl.mesh.material.uniforms.uLevel.value = pl.map.level;
+    pl.mesh.material.uniforms.uLevel.value = pl.level ?? pl.map.level;
   }
   if (!SLICE.mesh || !SLICE.mesh.visible) return;
   const r = livePlacement();
@@ -678,9 +678,28 @@ function savePlane() {
   const r = livePlacement();
   planeCount += 1;
   addSavedPlane({ name: `Plane ${planeCount}`, color: PLANE_COLORS[(planeCount - 1) % PLANE_COLORS.length],
-    p0: _p0.clone(), Rt: _Rt.clone(), r, thick: SLICE.thick, map: SLICE.map, visible: true });
+    p0: _p0.clone(), Rt: _Rt.clone(), r, thick: SLICE.thick, map: SLICE.map, level: null, visible: true });
   renderPlaneList(); storePlanes(); redraw();
   status(`Plane ${planeCount} saved. Move the live plane to place the next one.`);
+}
+// planes the page was made with (spec "planes"); they come back on every visit
+function loadPresetPlanes() {
+  for (const p of DATA.planes || []) {
+    const map = S.maps.find((m) => m.info.name === p.map) || S.maps.find((m) => m.info.visible) || S.maps[0];
+    if (!map) return;
+    const Rt = new THREE.Matrix4().makeBasis(new THREE.Vector3(...p.ex), new THREE.Vector3(...p.ey), new THREE.Vector3(...p.n));
+    addSavedPlane({ name: p.name, color: p.color ?? PLANE_COLORS[S.planes.length % PLANE_COLORS.length],
+      p0: new THREE.Vector3(...p.p0), Rt, r: p.r, thick: p.thick, map, level: p.level ?? null,
+      visible: p.visible !== false, preset: true });
+  }
+}
+// turn the view onto a saved plane: centred on it, facing it
+function goToPlane(i) {
+  const pl = S.planes[i];
+  pl.visible = true;
+  renderPlaneList();
+  animateTo(pl.p0.clone(), new THREE.Quaternion().setFromRotationMatrix(pl.Rt.clone().transpose()));
+  status(`${pl.name}${pl.level != null ? `, contoured at ${pl.level}` : ""}`);
 }
 function removePlane(i) {
   const [pl] = S.planes.splice(i, 1);
@@ -705,23 +724,28 @@ function renderPlaneList() {
     li.className = "plane";
     const chip = "#" + pl.color.toString(16).padStart(6, "0");
     li.innerHTML = `<input type="checkbox" id="plane-vis-${i}"><label for="plane-vis-${i}"><span class="chip" ` +
-      `style="border-color:${chip}" aria-hidden="true"></span><span class="name"></span></label>` +
+      `style="border-color:${chip}" aria-hidden="true"></span></label>` +
+      `<button type="button" class="go"></button>` +
       `<button type="button">Edit</button><button type="button" aria-label="Delete">&times;</button>`;
-    li.querySelector(".name").textContent = `${pl.name} · ${pl.map.info.name}${pl.thick ? ` · ${pl.thick.toFixed(1)} Å` : ""}`;
+    const go = li.querySelector(".go");
+    go.textContent = pl.name + (pl.preset ? "" : " (yours)");
+    go.title = `Look at ${pl.name}: ${pl.map.info.name}${pl.thick ? `, ${pl.thick.toFixed(1)} Å thick` : ""}`;
+    go.addEventListener("click", () => goToPlane(i));
     const cb = li.querySelector("input");
     cb.checked = pl.visible;
     cb.addEventListener("change", () => { pl.visible = cb.checked; storePlanes(); redraw(); });
-    const [edit, del] = li.querySelectorAll("button");
+    const [, edit, del] = li.querySelectorAll("button");
     edit.addEventListener("click", () => editPlane(i));
     del.setAttribute("aria-label", `Delete ${pl.name}`);
     del.addEventListener("click", () => removePlane(i));
     ul.appendChild(li);
   });
   $("#plane-list").hidden = !S.planes.length;
+  $("#planes-empty").hidden = S.planes.length > 0;
 }
 function storePlanes() {
   try {
-    localStorage.setItem(PLANE_KEY, JSON.stringify({ count: planeCount, planes: S.planes.map((pl) => ({ name: pl.name,
+    localStorage.setItem(PLANE_KEY, JSON.stringify({ count: planeCount, planes: S.planes.filter((pl) => !pl.preset).map((pl) => ({ name: pl.name,
       color: pl.color, p0: pl.p0.toArray(), Rt: pl.Rt.toArray(), r: pl.r, thick: pl.thick, map: pl.map.info.name,
       visible: pl.visible })) }));
   } catch (err) { /* storage blocked */ }
@@ -735,7 +759,7 @@ function loadPlanes() {
     const map = S.maps.find((m) => m.info.name === p.map);
     if (!map) continue;
     addSavedPlane({ name: p.name, color: p.color, p0: new THREE.Vector3(...p.p0), Rt: new THREE.Matrix4().fromArray(p.Rt),
-      r: p.r, thick: p.thick, map, visible: p.visible !== false });
+      r: p.r, thick: p.thick, map, level: null, visible: p.visible !== false });
   }
 }
 function setTilt(axis, deg) {
@@ -955,10 +979,9 @@ function fitZoom(radius) {
   return Math.min(400, Math.max(4, radius / half));
 }
 
-function applyStop(k) {
-  const stops = DATA.stops;
-  S.stop = stops.length ? Math.max(0, Math.min(stops.length - 1, k)) : -1;
-  const s = S.stop >= 0 ? stops[S.stop] : DATA.start;
+// the starting view of the page (also "Reset view")
+function applyView() {
+  const s = DATA.start;
   for (const m of S.maps) {
     const v = s.maps ? s.maps[m.info.name] : undefined;
     if (v === false || v === null) m.visible = false;
@@ -973,52 +996,14 @@ function applyStop(k) {
   for (const m of S.maps) m.drawn = null;
   S.zoom = fitZoom(s.radius || 10);
   S.slab = s.slab || s.radius || 10;
-  SLICE.depth = 0;          // each stop starts with the slice through the focus, facing the viewer
+  SLICE.depth = 0;
   if (SLICE.lock) setSliceLock(false);
   setTilt("tiltX", 0); setTilt("tiltY", 0);
   syncDepthRange();
   const q = s.orient ? new THREE.Quaternion(...s.orient) : null;
   animateTo(new THREE.Vector3(...s.center), q);
   scheduleContour(true);
-  renderStop(s);
-}
-
-function renderStop(s) {
-  const n = DATA.stops.length;
-  const sel = $("#view-select");
-  if (n) sel.value = String(S.stop);
-  const box = $("#stop-text");
-  box.innerHTML = "";
-  for (const para of String(s.text || "").split(/\n\s*\n/)) {
-    if (!para.trim()) continue;
-    const p = document.createElement("p");
-    p.textContent = para.trim();
-    box.appendChild(p);
-  }
-  $("#note").hidden = !box.childElementCount;
-  $("#prev").disabled = $("#mini-prev").disabled = !n || S.stop <= 0;
-  $("#next").disabled = $("#mini-next").disabled = !n || S.stop >= n - 1;
-  $("#mini-pos").textContent = n ? `${S.stop + 1}/${n} ${s.name || ""}` : (s.name || "");
-  $("#mini-prev").hidden = $("#mini-next").hidden = !n;
-  try { if (n) history.replaceState(null, "", `#stop-${S.stop + 1}`); } catch (e) { /* not allowed in some frames */ }
   status("");
-}
-function renderViewList() {
-  const sel = $("#view-select");
-  sel.innerHTML = "";
-  DATA.stops.forEach((st, k) => {
-    const o = document.createElement("option");
-    o.value = String(k);
-    o.textContent = st.name || `View ${k + 1}`;
-    sel.appendChild(o);
-  });
-  if (!DATA.stops.length) {
-    const o = document.createElement("option");
-    o.textContent = "Whole structure";
-    sel.appendChild(o);
-    sel.disabled = true;
-  }
-  sel.addEventListener("change", () => applyStop(+sel.value));
 }
 
 // ---------------------------------------------------------------- structure
@@ -1143,9 +1128,7 @@ el.addEventListener("wheel", (e) => {
 }, { passive: false });
 window.addEventListener("keydown", (e) => {
   if (e.target.closest && e.target.closest("input, select")) return;
-  if (e.key === "ArrowRight") applyStop(S.stop + 1);
-  else if (e.key === "ArrowLeft") applyStop(S.stop - 1);
-  else if (e.key === "f" || e.key === "F") setFull(!$("#app").classList.contains("full"));
+  if (e.key === "f" || e.key === "F") setFull(!$("#app").classList.contains("full"));
   else if ((e.key === "l" || e.key === "L") && S.style === "slice") setSliceLock(!SLICE.lock);
   else if (e.key === "a" || e.key === "A") toggleStructure();
   else if ((e.key === "s" || e.key === "S") && S.style === "slice") savePlane();
@@ -1167,9 +1150,7 @@ $("#slice-thick").addEventListener("input", (e) => setThickness(+e.target.value)
 for (const b of [$("#slice-save"), $("#mini-save")]) b.addEventListener("click", savePlane);
 $("#slice-atoms").addEventListener("click", planeThroughLabels);
 $("#mini-atoms").addEventListener("click", toggleStructure);
-$("#prev").addEventListener("click", () => applyStop(S.stop - 1));
-$("#next").addEventListener("click", () => applyStop(S.stop + 1));
-$("#reset").addEventListener("click", () => applyStop(S.stop));   // back to the saved view
+$("#reset").addEventListener("click", applyView);
 $("#clear").addEventListener("click", () => { clearLabels(); status(""); });
 $("#slab-down").addEventListener("click", () => { S.slab = Math.max(1, S.slab / 1.3); syncDepthRange(); redraw(); });
 $("#slab-up").addEventListener("click", () => { S.slab = Math.min(200, S.slab * 1.3); syncDepthRange(); redraw(); });
@@ -1196,8 +1177,6 @@ function setFull(on) {
   try { localStorage.setItem("moorlight-share-full", on ? "1" : "0"); } catch (err) { /* storage blocked */ }
 }
 $("#fullscreen").addEventListener("click", () => setFull(!$("#app").classList.contains("full")));
-$("#mini-prev").addEventListener("click", () => applyStop(S.stop - 1));
-$("#mini-next").addEventListener("click", () => applyStop(S.stop + 1));
 try { if (localStorage.getItem("moorlight-share-full") === "1") setFull(true); } catch (err) { /* storage blocked */ }
 
 // ------------------------------------------------------------------- start
@@ -1227,11 +1206,10 @@ async function start() {
   }
   renderMapList();
   renderModelList();
-  renderViewList();
+  loadPresetPlanes();
   loadPlanes();
   renderPlaneList();
-  const h = /^#stop-(\d+)$/.exec(location.hash || "");
-  applyStop(h ? parseInt(h[1], 10) - 1 : (DATA.stops.length ? 0 : -1));
+  applyView();
 }
 start().catch((err) => {
   $("#loading").hidden = false;
