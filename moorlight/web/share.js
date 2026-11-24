@@ -57,7 +57,7 @@ scene.add(keyLight);
 const lineMaterials = new Set();
 
 function lineMat(width, opts = {}) {
-  const m = new LineMaterial({ linewidth: width * DPR, worldUnits: false, fog: true, ...opts });
+  const m = new LineMaterial({ linewidth: Math.max(1, width * DPR), worldUnits: false, fog: true, ...opts });
   m.resolution.set(vp.clientWidth * DPR, vp.clientHeight * DPR);
   lineMaterials.add(m);
   return m;
@@ -525,7 +525,7 @@ function drawMap(m) {
     if (!seg.length) continue;
     const g = new LineSegmentsGeometry();
     g.setPositions(seg);
-    m.obj.add(new LineSegments2(g, m.mats[k] || (m.mats[k] = lineMat(1.1, { color: mapColor(m, r.sign) }))));
+    m.obj.add(new LineSegments2(g, m.mats[k] || (m.mats[k] = lineMat(0.6, { color: mapColor(m, r.sign) }))));
   }
   redraw();
 }
