@@ -90,7 +90,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   color: var(--muted); }
 #app.full #mini-nav { display: flex; }
 #mini-depth { position: absolute; z-index: 2; left: 50%; transform: translateX(-50%);
-  bottom: calc(108px + env(safe-area-inset-bottom, 0px)); display: none; grid-template-columns: auto minmax(0, 1fr) auto;
+  bottom: calc(108px + env(safe-area-inset-bottom, 0px)); display: none; grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center; gap: 8px; width: min(440px, calc(100% - 24px)); padding: 2px 10px; border-radius: 10px; }
 #mini-depth span { font: 0.8rem var(--font-data); color: var(--muted); }
 #mini-depth output { text-align: right; font: 0.85rem var(--font-data); font-variant-numeric: tabular-nums; }
@@ -120,7 +120,8 @@ h3 { margin: 0 0 6px; font: 500 0.72rem var(--font-data); letter-spacing: 0.08em
 input[type=range] { width: 100%; min-width: 0; height: 32px; margin: 0; accent-color: var(--accent); touch-action: pan-y; }
 .view-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .seg button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
-.depth-row { display: grid; grid-template-columns: auto minmax(0, 1fr) 4.6em; align-items: center; gap: 8px; margin-top: 8px; }
+.depth-row { display: grid; grid-template-columns: auto minmax(0, 1fr) 4.6em auto; align-items: center; gap: 8px; margin-top: 8px; }
+#slice-lock[aria-pressed="true"], #mini-lock[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 .depth-row label { font-size: 0.85rem; color: var(--muted); }
 .depth-row output { text-align: right; font: 0.85rem var(--font-data); font-variant-numeric: tabular-nums; }
 #app:not(.slicing) .slice-only { display: none !important; }
@@ -170,6 +171,7 @@ kbd { font: 0.8rem var(--font-data); }
       <span>Depth</span>
       <input type="range" id="mini-depth-range" min="-8" max="8" step="0.1" value="0" aria-label="Slice depth">
       <output id="mini-depth-out" for="mini-depth-range">+0.0 Å</output>
+      <button id="mini-lock" type="button" aria-pressed="false" title="Fix the plane in the molecule (L)">Fix plane</button>
     </div>
     <div id="mini-nav" class="fab" role="group" aria-label="Tour stops">
       <button id="mini-prev" type="button" aria-label="Previous stop">&#9664;</button>
@@ -200,6 +202,7 @@ kbd { font: 0.8rem var(--font-data); }
         <label for="slice-depth">Slice depth</label>
         <input type="range" id="slice-depth" min="-8" max="8" step="0.1" value="0">
         <output id="slice-depth-out" for="slice-depth">+0.0 Å</output>
+        <button id="slice-lock" type="button" aria-pressed="false" title="Fix the plane in the molecule (L)">Fix plane</button>
       </div>
     </div>
     <div>

@@ -491,25 +491,28 @@ function scheduleContour(now = false) {
 // molecule), at an adjustable depth. It shows the active map (the first visible one): green +, red - (blue for
 // 2mFo-DFc-like maps), stronger towards 3 x level, with contour lines at 1, 2, 4, 8 ... x level. The plane is dark
 // glass: atoms behind it are dimmed, atoms in front stay bright.
-const SLICE = { mesh: null, map: null, failed: false, depth: 0 };
+const SLICE = { mesh: null, halo: null, map: null, failed: false, depth: 0, lock: null };   // lock: {c, Rt}
 const SLICE_VS = `
-varying vec3 vScene;
+uniform mat4 uPlane;
+varying vec3 vModel;
+varying vec2 vXY;
 void main() {
-  vec4 w = modelMatrix * vec4(position, 1.0);
-  vScene = w.xyz;
-  gl_Position = projectionMatrix * viewMatrix * w;
+  vModel = (uPlane * vec4(position, 1.0)).xyz;
+  vXY = position.xy;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }`;
 const SLICE_FS = `
 precision highp float;
 precision highp sampler3D;
 uniform sampler3D uMap;
-uniform mat3 uGinv, uRinv;
-uniform vec3 uOrigin, uCenter, uN, uPos, uNeg;
-uniform float uLevel, uR;
+uniform mat3 uGinv;
+uniform vec3 uOrigin, uN, uPos, uNeg;
+uniform float uLevel;
 uniform int uSigned;
-varying vec3 vScene;
+varying vec3 vModel;
+varying vec2 vXY;
 void main() {
-  vec3 idx = uGinv * (uCenter + uRinv * vScene - uOrigin);
+  vec3 idx = uGinv * (vModel - uOrigin);
   float v = texture(uMap, (idx.zyx + 0.5) / uN.zyx).r;
   float a = (uSigned == 0 && v < 0.0) ? 0.0 : abs(v);
   vec3 hue = v >= 0.0 ? uPos : uNeg;
@@ -520,8 +523,6 @@ void main() {
   float line = (1.0 - smoothstep(0.0, 1.5 * fwidth(g), abs(fract(g + 0.5) - 0.5))) * smoothstep(0.85, 0.95, a / uLevel);
   col = mix(col, min(hue * 1.2 + 0.3, vec3(1.0)), line);
   alpha = max(alpha, line);
-  float edge = max(abs(vScene.x), abs(vScene.y)) / uR;
-  alpha *= 1.0 - smoothstep(0.92, 1.0, edge);
   gl_FragColor = vec4(col * alpha, alpha);
 }`;
 
@@ -541,22 +542,39 @@ function mapTexture(m) {
 }
 function updateSlice() {
   const m = S.style === "slice" ? activeMap() : null;
-  if (!m) { if (SLICE.mesh) SLICE.mesh.visible = false; return; }
+  if (!m) {
+    if (SLICE.mesh) SLICE.mesh.visible = false;
+    if (SLICE.halo) SLICE.halo.visible = false;
+    return;
+  }
   if (!SLICE.mesh) {
     const mat = new THREE.ShaderMaterial({
       vertexShader: SLICE_VS, fragmentShader: SLICE_FS, side: THREE.DoubleSide, transparent: true,
       premultipliedAlpha: true, depthWrite: false,
       uniforms: {
-        uMap: { value: null }, uGinv: { value: new THREE.Matrix3() }, uRinv: { value: new THREE.Matrix3() },
-        uOrigin: { value: new THREE.Vector3() }, uCenter: { value: new THREE.Vector3() }, uN: { value: new THREE.Vector3() },
-        uPos: { value: new THREE.Color() }, uNeg: { value: new THREE.Color() }, uLevel: { value: 1 }, uR: { value: 1 },
-        uSigned: { value: 1 },
+        uMap: { value: null }, uPlane: { value: new THREE.Matrix4() }, uGinv: { value: new THREE.Matrix3() },
+        uOrigin: { value: new THREE.Vector3() }, uN: { value: new THREE.Vector3() }, uPos: { value: new THREE.Color() },
+        uNeg: { value: new THREE.Color() }, uLevel: { value: 1 }, uSigned: { value: 1 },
       },
     });
+    // unit square; its matrix (in model coordinates) places, turns and sizes it every frame
     SLICE.mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+    SLICE.mesh.matrixAutoUpdate = false;
     SLICE.mesh.frustumCulled = false;
     SLICE.mesh.renderOrder = 5;
-    scene.add(SLICE.mesh);          // in screen axes: it faces the viewer whatever the rotation
+    const frame = new LineSegmentsGeometry();
+    frame.setPositions([-1, -1, 0, 1, -1, 0, 1, -1, 0, 1, 1, 0, 1, 1, 0, -1, 1, 0, -1, 1, 0, -1, -1, 0]);
+    const outline = new LineSegments2(frame, lineMat(2, { color: 0xe6c229 }));
+    outline.frustumCulled = false;
+    SLICE.mesh.add(outline);
+    world.add(SLICE.mesh);
+    // atoms the plane cuts through
+    const total = S.mols.reduce((t, x) => t + x.data.atoms.length, 0);
+    SLICE.halo = new THREE.InstancedMesh(sphereGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true,
+      opacity: 0.45, depthWrite: false }), Math.max(1, total));
+    SLICE.halo.count = 0;
+    SLICE.halo.frustumCulled = false;
+    world.add(SLICE.halo);
   }
   const u = SLICE.mesh.material.uniforms;
   if (SLICE.map !== m) {
@@ -570,17 +588,49 @@ function updateSlice() {
     u.uSigned.value = m.info.kind === "diff" ? 1 : 0;
   }
   u.uLevel.value = m.level;
-  u.uR.value = S.radius;
-  SLICE.mesh.scale.set(S.radius, S.radius, 1);
-  SLICE.mesh.visible = true;
+  SLICE.mesh.visible = SLICE.halo.visible = true;
 }
-// per frame: the plane stays in the screen plane at the chosen depth, so its map coordinates follow the rotation
+// per frame: place the plane. It faces the viewer through the focus (or stays where it was fixed), at the chosen
+// depth along its normal; atoms within 0.5 Å of it get a halo.
+const _M = new THREE.Matrix4(), _T = new THREE.Matrix4(), _Rt = new THREE.Matrix4();
+const _n = new THREE.Vector3(), _ex = new THREE.Vector3(), _ey = new THREE.Vector3(), _p0 = new THREE.Vector3();
 function sliceFrame() {
   if (!SLICE.mesh || !SLICE.mesh.visible) return;
-  const u = SLICE.mesh.material.uniforms;
-  SLICE.mesh.position.set(0, 0, SLICE.depth);
-  u.uCenter.value.copy(S.center);
-  u.uRinv.value.setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(rot.quaternion)).transpose();
+  const c = SLICE.lock ? SLICE.lock.c : S.center;
+  if (SLICE.lock) _Rt.copy(SLICE.lock.Rt);
+  else _Rt.makeRotationFromQuaternion(rot.quaternion).transpose();
+  const r = S.radius;
+  _M.makeTranslation(c.x, c.y, c.z).multiply(_Rt).multiply(_T.makeTranslation(0, 0, SLICE.depth))
+    .multiply(_T.makeScale(r, r, 1));
+  SLICE.mesh.matrix.copy(_M);
+  SLICE.mesh.matrixWorldNeedsUpdate = true;
+  SLICE.mesh.material.uniforms.uPlane.value.copy(_M);
+  _ex.setFromMatrixColumn(_Rt, 0); _ey.setFromMatrixColumn(_Rt, 1); _n.setFromMatrixColumn(_Rt, 2);
+  _p0.copy(c).addScaledVector(_n, SLICE.depth);
+  let k = 0;
+  for (const mol of S.mols) {
+    if (!mol.group.visible) continue;
+    const x = mol.xyz, el = mol.data.element;
+    for (let i = 0; i < el.length; i++) {
+      if (el[i] === "H") continue;
+      const dx = x[3*i] - _p0.x, dy = x[3*i+1] - _p0.y, dz = x[3*i+2] - _p0.z;
+      if (Math.abs(dx * _n.x + dy * _n.y + dz * _n.z) > 0.5) continue;
+      if (Math.abs(dx * _ex.x + dy * _ex.y + dz * _ex.z) > r || Math.abs(dx * _ey.x + dy * _ey.y + dz * _ey.z) > r) continue;
+      _m.compose(_v.set(x[3*i], x[3*i+1], x[3*i+2]), _q.identity(), _s.set(0.42, 0.42, 0.42));
+      SLICE.halo.setMatrixAt(k++, _m);
+    }
+  }
+  SLICE.halo.count = k;
+  SLICE.halo.instanceMatrix.needsUpdate = true;
+}
+function setSliceLock(on) {
+  SLICE.lock = on ? { c: S.center.clone(), Rt: new THREE.Matrix4().makeRotationFromQuaternion(rot.quaternion).transpose() } : null;
+  for (const b of [$("#slice-lock"), $("#mini-lock")]) {
+    b.setAttribute("aria-pressed", String(on));
+    b.textContent = on ? "Release" : "Fix plane";
+  }
+  if (on) status("Plane fixed in the molecule: rotate to see it from the side; the depth slider moves it along its normal.");
+  redraw();
 }
 renderer.debug.onShaderError = (gl, program, vs, fs) => {
   SLICE.failed = true;
@@ -735,7 +785,8 @@ function applyStop(k) {
   for (const m of S.maps) m.drawn = null;
   S.zoom = fitZoom(s.radius || 10);
   S.slab = s.slab || s.radius || 10;
-  SLICE.depth = 0;          // each stop starts with the slice through the focus
+  SLICE.depth = 0;          // each stop starts with the slice through the focus, facing the viewer
+  if (SLICE.lock) setSliceLock(false);
   syncDepthRange();
   const q = s.orient ? new THREE.Quaternion(...s.orient) : null;
   animateTo(new THREE.Vector3(...s.center), q);
@@ -856,6 +907,7 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "ArrowRight") applyStop(S.stop + 1);
   else if (e.key === "ArrowLeft") applyStop(S.stop - 1);
   else if (e.key === "f" || e.key === "F") setFull(!$("#app").classList.contains("full"));
+  else if ((e.key === "l" || e.key === "L") && S.style === "slice") setSliceLock(!SLICE.lock);
 });
 
 document.querySelectorAll("#style-row button").forEach((b) => b.addEventListener("click", () => setStyle(b.dataset.style)));
@@ -866,6 +918,7 @@ try {
 document.querySelectorAll("#style-row button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.style === S.style)));
 $("#app").classList.toggle("slicing", S.style === "slice");
 for (const el of [$("#slice-depth"), $("#mini-depth-range")]) el.addEventListener("input", () => setSliceDepth(+el.value));
+for (const b of [$("#slice-lock"), $("#mini-lock")]) b.addEventListener("click", () => setSliceLock(!SLICE.lock));
 $("#prev").addEventListener("click", () => applyStop(S.stop - 1));
 $("#next").addEventListener("click", () => applyStop(S.stop + 1));
 $("#reset").addEventListener("click", () => applyStop(S.stop));
