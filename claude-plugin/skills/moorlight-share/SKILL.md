@@ -141,20 +141,28 @@ Nothing runs on the cluster after the page is written.
 
 ## The page
 
-- **Theme:** one deliberate dark look (Coot black) in every theme.
-- **Layout:**
-  - On an upright phone the panel sits under the view.
-  - On a phone turned sideways, and on wide screens, the panel sits beside the view.
-  - The button at the top right of the view (or F) shows the view alone, with a small floating ◀ ▶ bar for the
-    stops. The page remembers that choice.
-- **Map styles:**
+The page is a viewer first. Its panel, from top to bottom:
+- **Maps:** visibility and a log-scale level slider for each map.
+- **Maps drawn as:**
   - Mesh: marching cubes, Coot's chicken wire.
   - Surface: shaded and transparent.
-  - Slice: an Olex2-style section through the focus that faces the viewer and turns with the molecule. It shows
-    the first visible map in green/red, with contour lines at 1, 2, 4, 8 … × level, and has a depth slider.
-- **Levels:** every map has a log-scale level slider.
+  - Slice: an Olex2-style section through the focus. It faces the viewer and turns with the molecule until it
+    is fixed, and shows the first visible map in green/red with contour lines at 1, 2, 4, 8 … × level.
+  - Slice controls: depth and two tilt sliders, Fix plane, Through labelled atoms (the best plane through three
+    or more tapped atoms; the view turns to face it) and Face me.
+- **Structure:** a checkbox for each model and for the neighbouring cells, hydrogens, clear labels, slab.
+- **Saved views:** the stops, as a menu with ◀ ▶. A stop's text is a collapsed note.
 
-## Writing the tour
+Other details:
+- Theme: one deliberate dark look (Coot black).
+- Layout: on an upright phone the panel sits under the view; on a phone turned sideways and on wide screens it
+  sits beside it.
+- Full screen: the button at the top right of the view (or F) shows the view alone, with level and depth
+  sliders, ◀ ▶ and an Atoms toggle (A).
+
+## Writing the saved views
+
+Stops are saved views with an optional short note; the page is used as a viewer, so keep notes brief.
 
 - Start with an overview stop (the whole molecule, `radius` large enough), then one stop per finding.
 - One finding per stop, two to four sentences. Name the map and the level, and give the numbers from `--check`

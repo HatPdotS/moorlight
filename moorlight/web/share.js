@@ -305,7 +305,7 @@ function updateLabels() {
     const [k, i] = key.split(":").map(Number);
     const x = S.mols[k].xyz;
     v.set(x[3*i], x[3*i+1], x[3*i+2]).applyMatrix4(world.matrixWorld).project(camera);
-    div.style.display = v.z > -1 && v.z < 1 ? "" : "none";
+    div.style.display = v.z > -1 && v.z < 1 && S.mols[k].group.visible ? "" : "none";
     div.style.left = `${(v.x + 1) / 2 * rect.width}px`;
     div.style.top = `${(1 - v.y) / 2 * rect.height}px`;
   }
@@ -491,7 +491,7 @@ function scheduleContour(now = false) {
 // molecule), at an adjustable depth. It shows the active map (the first visible one): green +, red - (blue for
 // 2mFo-DFc-like maps), stronger towards 3 x level, with contour lines at 1, 2, 4, 8 ... x level. The plane is dark
 // glass: atoms behind it are dimmed, atoms in front stay bright.
-const SLICE = { mesh: null, halo: null, map: null, failed: false, depth: 0, lock: null };   // lock: {c, Rt}
+const SLICE = { mesh: null, halo: null, map: null, failed: false, depth: 0, tiltX: 0, tiltY: 0, lock: null };   // lock: {c, Rt}
 const SLICE_VS = `
 uniform mat4 uPlane;
 varying vec3 vModel;
@@ -599,6 +599,8 @@ function sliceFrame() {
   const c = SLICE.lock ? SLICE.lock.c : S.center;
   if (SLICE.lock) _Rt.copy(SLICE.lock.Rt);
   else _Rt.makeRotationFromQuaternion(rot.quaternion).transpose();
+  // tilt about the plane's own horizontal, then vertical axis
+  _Rt.multiply(_T.makeRotationX(THREE.MathUtils.degToRad(SLICE.tiltX))).multiply(_T.makeRotationY(THREE.MathUtils.degToRad(SLICE.tiltY)));
   const r = S.radius;
   _M.makeTranslation(c.x, c.y, c.z).multiply(_Rt).multiply(_T.makeTranslation(0, 0, SLICE.depth))
     .multiply(_T.makeScale(r, r, 1));
@@ -622,6 +624,73 @@ function sliceFrame() {
   }
   SLICE.halo.count = k;
   SLICE.halo.instanceMatrix.needsUpdate = true;
+}
+function setTilt(axis, deg) {
+  SLICE[axis] = Math.max(-90, Math.min(90, deg));
+  const id = axis === "tiltX" ? "slice-tilt-x" : "slice-tilt-y";
+  $(`#${id}`).value = String(SLICE[axis]);
+  $(`#${id}-out`).textContent = `${Math.round(SLICE[axis])}°`;
+  redraw();
+}
+function faceMe() {
+  if (SLICE.lock) setSliceLock(false);
+  setTilt("tiltX", 0); setTilt("tiltY", 0); setSliceDepth(0);
+}
+// best plane through the labelled atoms (3 or more): the plane is fixed there and the view turns to face it
+function planeThroughLabels() {
+  const pts = [];
+  for (const key of S.labels.keys()) {
+    const [k, i] = key.split(":").map(Number);
+    const x = S.mols[k].xyz;
+    pts.push(new THREE.Vector3(x[3*i], x[3*i+1], x[3*i+2]));
+  }
+  if (pts.length < 3) { status("Label three or more atoms first (tap them), then put the plane through them."); return; }
+  const c = pts.reduce((a, p) => a.add(p), new THREE.Vector3()).multiplyScalar(1 / pts.length);
+  const C = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (const p of pts) {
+    const d = [p.x - c.x, p.y - c.y, p.z - c.z];
+    for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) C[a][b] += d[a] * d[b];
+  }
+  const { vectors } = eigenSym3(C);          // columns, ascending eigenvalues
+  const n = new THREE.Vector3(...vectors.map((r) => r[0])).normalize();
+  const ex = new THREE.Vector3(...vectors.map((r) => r[2])).normalize();
+  const ey = new THREE.Vector3().crossVectors(n, ex).normalize();
+  const Rt = new THREE.Matrix4().makeBasis(ex, ey, n);
+  SLICE.lock = { c, Rt };
+  for (const b of [$("#slice-lock"), $("#mini-lock")]) { b.setAttribute("aria-pressed", "true"); b.textContent = "Release"; }
+  setTilt("tiltX", 0); setTilt("tiltY", 0); setSliceDepth(0);
+  if (S.style !== "slice") setStyle("slice");
+  animateTo(c, new THREE.Quaternion().setFromRotationMatrix(Rt.clone().transpose()));
+  status(`Plane through ${pts.length} labelled atoms (rms out of plane ${Math.sqrt(Math.max(0, eigenSym3(C).values[0]) / pts.length).toFixed(2)} Å).`);
+}
+// eigen decomposition of a symmetric 3x3 matrix (Jacobi); returns values ascending and vectors as columns
+function eigenSym3(A) {
+  const a = A.map((r) => r.slice()), v = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  for (let sweep = 0; sweep < 50; sweep++) {
+    let off = 0;
+    for (let p = 0; p < 2; p++) for (let q = p + 1; q < 3; q++) off += a[p][q] * a[p][q];
+    if (off < 1e-20) break;
+    for (let p = 0; p < 2; p++) for (let q = p + 1; q < 3; q++) {
+      if (Math.abs(a[p][q]) < 1e-30) continue;
+      const th = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+      const t = Math.sign(th || 1) / (Math.abs(th) + Math.sqrt(th * th + 1));
+      const cs = 1 / Math.sqrt(t * t + 1), sn = t * cs;
+      for (let k = 0; k < 3; k++) {
+        const akp = a[k][p], akq = a[k][q];
+        a[k][p] = cs * akp - sn * akq; a[k][q] = sn * akp + cs * akq;
+      }
+      for (let k = 0; k < 3; k++) {
+        const apk = a[p][k], aqk = a[q][k];
+        a[p][k] = cs * apk - sn * aqk; a[q][k] = sn * apk + cs * aqk;
+      }
+      for (let k = 0; k < 3; k++) {
+        const vkp = v[k][p], vkq = v[k][q];
+        v[k][p] = cs * vkp - sn * vkq; v[k][q] = sn * vkp + cs * vkq;
+      }
+    }
+  }
+  const order = [0, 1, 2].sort((i, j) => a[i][i] - a[j][j]);
+  return { values: order.map((i) => a[i][i]), vectors: v.map((r) => order.map((i) => r[i])) };
 }
 function setSliceLock(on) {
   SLICE.lock = on ? { c: S.center.clone(), Rt: new THREE.Matrix4().makeRotationFromQuaternion(rot.quaternion).transpose() } : null;
@@ -787,6 +856,7 @@ function applyStop(k) {
   S.slab = s.slab || s.radius || 10;
   SLICE.depth = 0;          // each stop starts with the slice through the focus, facing the viewer
   if (SLICE.lock) setSliceLock(false);
+  setTilt("tiltX", 0); setTilt("tiltY", 0);
   syncDepthRange();
   const q = s.orient ? new THREE.Quaternion(...s.orient) : null;
   animateTo(new THREE.Vector3(...s.center), q);
@@ -796,9 +866,8 @@ function applyStop(k) {
 
 function renderStop(s) {
   const n = DATA.stops.length;
-  $("#stop-pos").textContent = n ? `${S.stop + 1} / ${n}` : "";
-  $("#stop-count").textContent = n ? `Stop ${S.stop + 1} of ${n}` : "View";
-  $("#stop-name").textContent = s.name || "";
+  const sel = $("#view-select");
+  if (n) sel.value = String(S.stop);
   const box = $("#stop-text");
   box.innerHTML = "";
   for (const para of String(s.text || "").split(/\n\s*\n/)) {
@@ -807,12 +876,63 @@ function renderStop(s) {
     p.textContent = para.trim();
     box.appendChild(p);
   }
+  $("#note").hidden = !box.childElementCount;
   $("#prev").disabled = $("#mini-prev").disabled = !n || S.stop <= 0;
   $("#next").disabled = $("#mini-next").disabled = !n || S.stop >= n - 1;
   $("#mini-pos").textContent = n ? `${S.stop + 1}/${n} ${s.name || ""}` : (s.name || "");
   $("#mini-prev").hidden = $("#mini-next").hidden = !n;
   try { if (n) history.replaceState(null, "", `#stop-${S.stop + 1}`); } catch (e) { /* not allowed in some frames */ }
   status("");
+}
+function renderViewList() {
+  const sel = $("#view-select");
+  sel.innerHTML = "";
+  DATA.stops.forEach((st, k) => {
+    const o = document.createElement("option");
+    o.value = String(k);
+    o.textContent = st.name || `View ${k + 1}`;
+    sel.appendChild(o);
+  });
+  if (!DATA.stops.length) {
+    const o = document.createElement("option");
+    o.textContent = "Whole structure";
+    sel.appendChild(o);
+    sel.disabled = true;
+  }
+  sel.addEventListener("change", () => applyStop(+sel.value));
+}
+
+// ---------------------------------------------------------------- structure
+function renderModelList() {
+  const ul = $("#mol-list");
+  ul.innerHTML = "";
+  S.mols.forEach((mol, k) => {
+    const li = document.createElement("li");
+    li.className = "mol";
+    const chip = "#" + carbonColor(k).toString(16).padStart(6, "0");
+    li.innerHTML = `<input type="checkbox" id="mol-vis-${k}"><label for="mol-vis-${k}">` +
+      `<span class="chip" style="background:${chip}" aria-hidden="true"></span><span class="name"></span></label>`;
+    li.querySelector(".name").textContent = mol.data.name;
+    const cb = li.querySelector("input");
+    cb.checked = mol.group.visible;
+    cb.addEventListener("change", () => setMolVisible(k, cb.checked));
+    ul.appendChild(li);
+  });
+  updateAtomsButton();
+}
+function setMolVisible(k, on) {
+  S.mols[k].group.visible = on;
+  const cb = $(`#mol-vis-${k}`);
+  if (cb) cb.checked = on;
+  updateAtomsButton();
+  redraw();
+}
+function updateAtomsButton() {
+  $("#mini-atoms").setAttribute("aria-pressed", String(S.mols.some((m) => m.group.visible)));
+}
+function toggleStructure() {
+  const show = !S.mols.some((m) => m.group.visible);
+  S.mols.forEach((m, k) => setMolVisible(k, show));
 }
 
 // ------------------------------------------------------------------ input
@@ -903,11 +1023,12 @@ el.addEventListener("wheel", (e) => {
   if (m) changeLevel(m, (e.shiftKey ? 0.5 : 0.1) * (e.deltaY > 0 ? -1 : 1));
 }, { passive: false });
 window.addEventListener("keydown", (e) => {
-  if (e.target.closest && e.target.closest("input")) return;
+  if (e.target.closest && e.target.closest("input, select")) return;
   if (e.key === "ArrowRight") applyStop(S.stop + 1);
   else if (e.key === "ArrowLeft") applyStop(S.stop - 1);
   else if (e.key === "f" || e.key === "F") setFull(!$("#app").classList.contains("full"));
   else if ((e.key === "l" || e.key === "L") && S.style === "slice") setSliceLock(!SLICE.lock);
+  else if (e.key === "a" || e.key === "A") toggleStructure();
 });
 
 document.querySelectorAll("#style-row button").forEach((b) => b.addEventListener("click", () => setStyle(b.dataset.style)));
@@ -919,9 +1040,14 @@ document.querySelectorAll("#style-row button").forEach((b) => b.setAttribute("ar
 $("#app").classList.toggle("slicing", S.style === "slice");
 for (const el of [$("#slice-depth"), $("#mini-depth-range")]) el.addEventListener("input", () => setSliceDepth(+el.value));
 for (const b of [$("#slice-lock"), $("#mini-lock")]) b.addEventListener("click", () => setSliceLock(!SLICE.lock));
+$("#slice-tilt-x").addEventListener("input", (e) => setTilt("tiltX", +e.target.value));
+$("#slice-tilt-y").addEventListener("input", (e) => setTilt("tiltY", +e.target.value));
+$("#slice-face").addEventListener("click", faceMe);
+$("#slice-atoms").addEventListener("click", planeThroughLabels);
+$("#mini-atoms").addEventListener("click", toggleStructure);
 $("#prev").addEventListener("click", () => applyStop(S.stop - 1));
 $("#next").addEventListener("click", () => applyStop(S.stop + 1));
-$("#reset").addEventListener("click", () => applyStop(S.stop));
+$("#reset").addEventListener("click", () => applyStop(S.stop));   // back to the saved view
 $("#clear").addEventListener("click", () => { clearLabels(); status(""); });
 $("#slab-down").addEventListener("click", () => { S.slab = Math.max(1, S.slab / 1.3); syncDepthRange(); redraw(); });
 $("#slab-up").addEventListener("click", () => { S.slab = Math.min(200, S.slab * 1.3); syncDepthRange(); redraw(); });
@@ -978,6 +1104,8 @@ async function start() {
     $("#loading").hidden = true;
   }
   renderMapList();
+  renderModelList();
+  renderViewList();
   const h = /^#stop-(\d+)$/.exec(location.hash || "");
   applyStop(h ? parseInt(h[1], 10) - 1 : (DATA.stops.length ? 0 : -1));
 }
