@@ -193,7 +193,8 @@ and scipy). There is no server and no port.
 
 ## The page
 
-- **Maps:** visibility and a log-scale level slider for each map.
+- **Maps:** visibility and a log-scale level slider for each map. Under each map: its rms and the level on the
+  map's own scale (σ maps: in map units; absolute maps: as a multiple of the rms). `--check` prints the same.
 - **Maps drawn as:** Mesh or Slice. Switching or changing maps never changes this mode. Slice mode shows slices
   only (no contours), of the map in use (the first visible); with every map off the planes are shown empty. In
   slice mode:

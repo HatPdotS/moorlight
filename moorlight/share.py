@@ -748,8 +748,12 @@ class Share:
             grid = {"native": f"own grid {x.n.tolist()} over the cell, nothing resampled",
                     "block": f"block {x.n.tolist()} of its own grid around the models, nothing resampled",
                     "box": f"resampled on a box {x.n.tolist()} x {x.G[0, 0]:.2f} A (tricubic)"}[x.mode]
-            p(f"\nmap {x.name!r} ({x.source}, {x.kind}, {grid}): level {x.level:g} {u}; whole map mean {x.mean:.3f} "
-              f"rms {x.rms:.3f}; stored values {vals.min():.2f} to {vals.max():.2f} {u}")
+            if x.units == "sigma":     # the level on the map's own scale too
+                on_scale = (f"±{x.level * x.rms:.3g}" if x.kind == "diff" else f"{x.mean + x.level * x.rms:.3g}") + " in map units"
+            else:
+                on_scale = f"{(x.level - (0 if x.kind == 'diff' else x.mean)) / x.rms:.3g} x rms"
+            p(f"\nmap {x.name!r} ({x.source}, {x.kind}, {grid}): level {x.level:g} {u} = {on_scale}; whole map mean "
+              f"{x.mean:.3g} rms {x.rms:.3g}; stored values {vals.min():.2f} to {vals.max():.2f} {u}")
             if x.filled > 0.001:
                 p(f"  WARNING: the map file covers {100 * x.coverage:.0f} % of the cell; {100 * x.filled:.0f} % of the "
                   "stored grid lies outside it and shows the map's mean")

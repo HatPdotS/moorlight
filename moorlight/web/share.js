@@ -1001,7 +1001,8 @@ function renderMapList() {
       `<span class="name"></span></label></div>` +
       `<div class="lvl"><button type="button" aria-label="Lower contour level">&minus;</button>` +
       `<input type="range" id="map-lvl-${k}" min="0" max="1000" step="1">` +
-      `<button type="button" aria-label="Raise contour level">+</button><output for="map-lvl-${k}"></output></div>`;
+      `<button type="button" aria-label="Raise contour level">+</button><output for="map-lvl-${k}"></output></div>` +
+      `<div class="scale"></div>`;
     li.querySelector(".name").textContent = m.info.name;
     const cb = li.querySelector("input[type=checkbox]");
     cb.checked = m.visible;
@@ -1014,6 +1015,7 @@ function renderMapList() {
     bindSlider(range, () => m);
     m.range = range;
     m.out = li.querySelector("output");
+    m.scaleEl = li.querySelector(".scale");
     ul.appendChild(li);
   });
   bindSlider($("#mini-level-range"), activeMap);
@@ -1022,6 +1024,15 @@ function renderMapList() {
 const levelStep = (m) => (m.info.kind === "diff" ? 0.5 : 0.25);
 const fmtLevel = (m, v = m.level) => `${m.kind === "diff" ? "±" : ""}${v < 10 ? v.toFixed(1) : v.toFixed(0)}${unit(m)}`;
 const activeMap = () => S.maps.find((x) => x.visible) || null;
+const fmt3 = (v) => { const a = Math.abs(v); return a && (a < 1e-3 || a >= 1e5) ? v.toExponential(2) : String(+v.toPrecision(3)); };
+// the map's rms and the level on the map's own (absolute) scale
+function scaleText(m) {
+  const { mean, rms } = m.info, diff = m.info.kind === "diff";
+  if (m.info.units === "sigma") {
+    return `map rms ${fmt3(rms)} · level ${diff ? "±" : ""}${fmt3(diff ? m.level * rms : mean + m.level * rms)} (map units)`;
+  }
+  return `map rms ${fmt3(rms)}${unit(m)} · level = ${fmt3((m.level - (diff ? 0 : mean)) / rms)} × rms`;
+}
 
 // Sliders run on a log scale from lo (1 for difference maps, 0.3 otherwise) to the map's largest value, so the
 // usual 3-6 level range gets most of the travel and the strongest peaks are still in reach.
@@ -1049,6 +1060,7 @@ function bindSlider(range, getMap) {
 function updateLevels(source = null) {
   for (const m of S.maps) {
     if (m.out) m.out.textContent = fmtLevel(m);
+    if (m.scaleEl) m.scaleEl.textContent = scaleText(m);
     if (m.range && m.range !== source) m.range.value = String(levelToPos(m, m.level));
   }
   S.maps.forEach((m, k) => { const cb = $(`#map-vis-${k}`); if (cb) cb.checked = m.visible; });
