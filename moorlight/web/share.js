@@ -29,6 +29,7 @@ const S = {
   radius: DATA.contour_radius || 10,
   style: "mesh",       // mesh | surface | slice
   planes: [],          // saved slice planes
+  depth: 0,            // where the visible slab sits along the view axis, Å from the rotation centre (+: towards you)
 };
 
 // ------------------------------------------------------------------ three
@@ -76,11 +77,11 @@ function updateCamera() {
   const h = S.zoom * TAN_HALF;              // half the visible height at the focus, in Å
   camera.left = -h * aspect; camera.right = h * aspect; camera.top = h; camera.bottom = -h;
   camera.position.set(0, 0, CAM_DIST);
-  camera.near = CAM_DIST - S.slab;
-  camera.far = CAM_DIST + S.slab;
+  camera.near = CAM_DIST - S.depth - S.slab;
+  camera.far = CAM_DIST - S.depth + S.slab;
   camera.updateProjectionMatrix();
-  scene.fog.near = CAM_DIST - S.slab * 0.3;
-  scene.fog.far = CAM_DIST + S.slab * 1.05;
+  scene.fog.near = CAM_DIST - S.depth - S.slab * 0.3;
+  scene.fog.far = CAM_DIST - S.depth + S.slab * 1.05;
   world.position.copy(S.center).multiplyScalar(-1);
 }
 
@@ -451,8 +452,16 @@ function surfaceMat(color) {
 function clearMapObj(m) {
   for (const ch of [...m.obj.children]) { m.obj.remove(ch); ch.geometry.dispose(); }
 }
+// the point the maps are contoured around: the rotation centre moved to the depth of the visible slab
+const _view = new THREE.Matrix4();
+function viewAxis() {           // model-space direction pointing at the viewer
+  const e = _view.makeRotationFromQuaternion(rot.quaternion).elements;
+  return new THREE.Vector3(e[2], e[6], e[10]);
+}
+function contourCenter() { return S.center.clone().addScaledVector(viewAxis(), S.depth); }
 function contourMap(m) {
-  const c = S.center.toArray();
+  const cc = contourCenter();
+  const c = cc.toArray();
   clearMapObj(m);
   const surface = S.style === "surface";
   m.style = S.style === "slice" ? "mesh" : S.style;
@@ -473,7 +482,7 @@ function contourMap(m) {
       m.obj.add(new LineSegments2(g, m.mats[k] || (m.mats[k] = lineMat(1.1, { color: mapColor(m, sign) }))));
     }
   }
-  m.drawn = { center: S.center.clone(), level: m.level, style: m.style, radius: S.radius };
+  m.drawn = { center: cc, level: m.level, style: m.style, radius: S.radius };
   redraw();
 }
 let contourTimer = null;
@@ -486,7 +495,7 @@ function scheduleContour(now = false) {
       if (!m.visible || m === sliced) continue;
       const d = m.drawn;
       const want = S.style === "slice" ? "mesh" : S.style;
-      if (d && d.center.distanceTo(S.center) < 0.5 && d.level === m.level && d.style === want && d.radius === S.radius) continue;
+      if (d && d.center.distanceTo(contourCenter()) < 0.5 && d.level === m.level && d.style === want && d.radius === S.radius) continue;
       contourMap(m);
     }
     updateSlice();
@@ -624,10 +633,11 @@ function livePlacement() {
   else _Rt.makeRotationFromQuaternion(rot.quaternion).transpose();
   _Rt.multiply(_T.makeRotationX(THREE.MathUtils.degToRad(SLICE.tiltX))).multiply(_T.makeRotationY(THREE.MathUtils.degToRad(SLICE.tiltY)));
   const r = S.radius;
-  _M.makeTranslation(c.x, c.y, c.z).multiply(_Rt).multiply(_T.makeTranslation(0, 0, SLICE.depth))
+  const d = SLICE.depth + (SLICE.lock ? 0 : S.depth);   // a free plane rides in the middle of the visible slab
+  _M.makeTranslation(c.x, c.y, c.z).multiply(_Rt).multiply(_T.makeTranslation(0, 0, d))
     .multiply(_T.makeScale(r, r, 1));
   _ex.setFromMatrixColumn(_Rt, 0); _ey.setFromMatrixColumn(_Rt, 1); _n.setFromMatrixColumn(_Rt, 2);
-  _p0.copy(c).addScaledVector(_n, SLICE.depth);
+  _p0.copy(c).addScaledVector(_n, d);
   return r;
 }
 // per frame: place the live plane; atoms inside it get a halo; saved planes follow their map's level
@@ -709,6 +719,7 @@ function goToPlane(i) {
   const pl = S.planes[i];
   pl.visible = true;
   renderPlaneList();
+  S.depth = 0;
   animateTo(pl.p0.clone(), new THREE.Quaternion().setFromRotationMatrix(pl.Rt.clone().transpose()));
   status(`${pl.name}${pl.level != null ? `, contoured at ${pl.level}` : ""}`);
 }
@@ -1038,6 +1049,7 @@ function applyView() {
   if (SLICE.lock) setSliceLock(false);
   setTilt("tiltX", 0); setTilt("tiltY", 0);
   syncDepthRange();
+  S.depth = 0;
   const q = s.orient ? new THREE.Quaternion(...s.orient) : null;
   animateTo(new THREE.Vector3(...s.center), q);
   scheduleContour(true);
@@ -1141,6 +1153,7 @@ function endPointer(e) {
   if (pointers.size || !gesture) return;
   const g = gesture;
   gesture = null;
+  if (g.moved || g.multi) scheduleContour();
   if (g.moved || g.multi || e.type === "pointercancel" || performance.now() - g.t0 > 600) return;
   const p = pick(e.clientX, e.clientY, g.touch ? 24 : 12);
   if (!p) return;
@@ -1148,6 +1161,7 @@ function endPointer(e) {
   if (lastTap && lastTap.mol === p.mol && lastTap.idx === p.idx && now - lastTap.t < 400) {
     toggleLabel(p.mol, p.idx);   // undo the first tap's label toggle
     const x = S.mols[p.mol].xyz;
+    S.depth = 0;               // the tapped atom becomes the rotation centre, with the slab around it
     animateTo(new THREE.Vector3(x[3*p.idx], x[3*p.idx+1], x[3*p.idx+2]), null);
     lastTap = null;
     return;
@@ -1219,27 +1233,26 @@ function depthExtent() {
     }
   }
   if (!Number.isFinite(lo)) { lo = -S.slab; hi = S.slab; }
-  DB.front = Math.max(hi, S.slab) + 1;    // z towards the viewer, relative to the focus
-  DB.back = Math.min(lo, -S.slab) - 1;
+  DB.front = Math.max(hi, S.depth + S.slab) + 1;    // z towards the viewer, relative to the rotation centre
+  DB.back = Math.min(lo, S.depth - S.slab) - 1;
 }
 const depthToFrac = (z) => (DB.front - z) / (DB.front - DB.back);
 function updateDepthBar() {
   depthExtent();
   const bar = $("#depthbar"), H = bar.clientHeight;
-  const top = depthToFrac(S.slab), bot = depthToFrac(-S.slab);
+  const top = depthToFrac(S.depth + S.slab), bot = depthToFrac(S.depth - S.slab);
   const win = $("#depth-window");
   win.style.top = `${top * H}px`;
   win.style.height = `${Math.max(14, (bot - top) * H)}px`;
   const tick = $("#depth-plane");
   const live = S.style === "slice" && !SLICE.off && SLICE.mesh && SLICE.mesh.visible && !SLICE.lock && !SLICE.tiltX && !SLICE.tiltY;
   tick.hidden = !live;
-  if (live) tick.style.top = `${depthToFrac(SLICE.depth) * H}px`;
-  bar.setAttribute("aria-valuetext", `slab ±${S.slab.toFixed(1)} Å`);
+  if (live) tick.style.top = `${depthToFrac(S.depth + SLICE.depth) * H}px`;
+  $("#depth-pivot").style.top = `${depthToFrac(0) * H}px`;
+  bar.setAttribute("aria-valuetext", `slab ±${S.slab.toFixed(1)} Å, ${S.depth >= 0 ? "+" : "\u2212"}${Math.abs(S.depth).toFixed(1)} Å from the rotation centre`);
 }
-function moveDepth(dz) {        // dz > 0: the focus goes into the screen
-  _zrow.makeRotationFromQuaternion(rot.quaternion);
-  const e = _zrow.elements;
-  S.center.addScaledVector(new THREE.Vector3(e[2], e[6], e[10]), -dz);
+function moveDepth(dz) {        // dz > 0: the visible slab goes into the screen; the rotation centre stays
+  S.depth -= dz;
   redraw(); scheduleContour();
 }
 function setSlab(v) {
@@ -1262,7 +1275,7 @@ function setSlab(v) {
     const inWin = t && t.closest && t.closest("#depth-window");
     if (grip) DB.drag = { mode: "slab" };
     else {
-      if (!inWin) moveDepth(-zAt(e.clientY));      // tap on the bar: jump there
+      if (!inWin) moveDepth(S.depth - zAt(e.clientY));      // tap on the bar: jump there
       DB.drag = { mode: "move", y: e.clientY };
     }
     bar.classList.add("active");
@@ -1270,7 +1283,7 @@ function setSlab(v) {
   bar.addEventListener("pointermove", (e) => {
     if (!DB.drag) return;
     if (DB.drag.mode === "slab") {
-      setSlab(Math.abs(zAt(e.clientY)));
+      setSlab(Math.abs(zAt(e.clientY) - S.depth));
     } else {
       const dy = e.clientY - DB.drag.y;
       DB.drag.y = e.clientY;

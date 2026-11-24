@@ -150,9 +150,12 @@ It is a viewer, not a presentation: there are no stops or texts.
 - **Structure:** a checkbox for each model and for the neighbouring cells, plus hydrogens, clear labels and Reset
   view.
 - **Depth bar** (right edge of the view): the structure from front (top) to back.
-  - Its window is the visible slab around the focus. Drag the window to move the focus into or out of the screen.
-  - Drag the window's ends to change the slab; tap the bar to jump.
-  - The yellow tick is the live slice. Keys: `,` `.` move, `[` `]` change the slab.
+  - Its window is the layer you see. Drag it to look deeper; drag its ends to make the layer thinner or thicker;
+    tap the bar to jump.
+  - The rotation centre (white dot) never moves with it. Double-tap an atom to make that atom the centre.
+  - The live slice rides in the middle of the window (yellow tick). Keys: `,` `.` move, `[` `]` change the
+    thickness.
+- **Zoom** only magnifies: the camera is orthographic and never enters the structure.
 - **Full screen** (button or F): level and depth sliders, Fix plane, Save, and an Atoms toggle (A).
 - **Theme:** one deliberate dark look (Coot black).
 - **Layout:** on an upright phone the panel sits under the view, otherwise beside it.

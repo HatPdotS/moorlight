@@ -143,6 +143,8 @@ details[hidden] { display: none; }
 #depth-window .grip::after { content: ""; position: absolute; left: 8px; right: 8px; top: 6px; height: 2px;
   border-radius: 1px; background: var(--accent); }
 #depth-plane { position: absolute; left: 0; right: 0; height: 0; border-top: 2px solid var(--accent); }
+#depth-pivot { position: absolute; left: 11px; width: 12px; height: 12px; margin-top: -6px; border-radius: 50%;
+  border: 2px solid #ffffff; background: rgba(0, 0, 0, 0.6); pointer-events: none; }
 #depthbar .end { position: absolute; left: 50%; transform: translate(-50%, -110%); top: 0; font: 9px var(--font-data);
   color: var(--muted); letter-spacing: 0.04em; pointer-events: none; }
 #depthbar .end.back { top: auto; bottom: 0; transform: translate(-50%, 110%); }
@@ -198,6 +200,7 @@ kbd { font: 0.8rem var(--font-data); }
       <span class="end">front</span>
       <div class="rail"></div>
       <div id="depth-window"><div class="grip top"></div><div class="grip bottom"></div></div>
+      <div id="depth-pivot" title="rotation centre"></div>
       <div id="depth-plane" hidden></div>
       <span class="end back">back</span>
     </div>
@@ -285,8 +288,9 @@ kbd { font: 0.8rem var(--font-data); }
       <summary>Controls</summary>
       <p>Drag to rotate, pinch to zoom (zoom only magnifies; it never moves you into the structure), move two
         fingers to pan. The bar at the right edge of the view is the
-        structure from front to back: drag its window to move through the structure, drag the window's ends to make the
-        visible slab thinner or thicker, tap the bar to jump. Tap an atom for its label and the map values there;
+        structure from front to back. Its window is the layer you see: drag it to look deeper or less deep, drag its ends to
+        make the layer thinner or thicker, tap the bar to jump. The molecule keeps turning about the same point (the white
+        dot on the bar); double-tap an atom to make it the rotation centre. Tap an atom for its label and the map values there;
         double-tap to centre on it. Sliders set each map's contour level. With a mouse: right-drag zooms, Ctrl-drag
         pans, the wheel changes the level of the first visible map, <kbd>F</kbd> shows the view alone, <kbd>,</kbd> <kbd>.</kbd> move in depth and
         <kbd>[</kbd> <kbd>]</kbd> change the slab, <kbd>A</kbd> hides the structure, <kbd>L</kbd> fixes the
