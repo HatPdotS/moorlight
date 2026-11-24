@@ -40,7 +40,11 @@ vp.prepend(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 scene.fog = new THREE.Fog(0x000000, 20, 40);
-const camera = new THREE.PerspectiveCamera(30, 1, 1, 1000);
+// Orthographic camera far from the focus: zooming only magnifies (S.zoom sets the visible height as a 30° view at
+// that distance would), and depth is only the slab around the focus, moved with the depth bar.
+const FOV = 30, CAM_DIST = 500, TAN_HALF = Math.tan(THREE.MathUtils.degToRad(FOV / 2));
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 1000);
+let aspect = 1;
 const rot = new THREE.Group();     // rotation about the centre
 const world = new THREE.Group();   // translation (-centre)
 rot.add(world); scene.add(rot);
@@ -61,20 +65,22 @@ function lineMat(width, opts = {}) {
 function resize() {
   const w = Math.max(1, vp.clientWidth), h = Math.max(1, vp.clientHeight);
   renderer.setSize(w, h, false);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
+  aspect = w / h;
+  updateCamera();
   for (const m of lineMaterials) m.resolution.set(w * DPR, h * DPR);
   redraw();
 }
 new ResizeObserver(resize).observe(vp);
 
 function updateCamera() {
-  camera.position.set(0, 0, S.zoom);
-  camera.near = Math.max(0.5, S.zoom - S.slab);
-  camera.far = S.zoom + S.slab;
+  const h = S.zoom * TAN_HALF;              // half the visible height at the focus, in Å
+  camera.left = -h * aspect; camera.right = h * aspect; camera.top = h; camera.bottom = -h;
+  camera.position.set(0, 0, CAM_DIST);
+  camera.near = CAM_DIST - S.slab;
+  camera.far = CAM_DIST + S.slab;
   camera.updateProjectionMatrix();
-  scene.fog.near = S.zoom - S.slab * 0.3;
-  scene.fog.far = S.zoom + S.slab * 1.05;
+  scene.fog.near = CAM_DIST - S.slab * 0.3;
+  scene.fog.far = CAM_DIST + S.slab * 1.05;
   world.position.copy(S.center).multiplyScalar(-1);
 }
 
@@ -1007,8 +1013,8 @@ function animate() {
 }
 
 function fitZoom(radius) {
-  const half = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * Math.min(1, camera.aspect);
-  return Math.min(400, Math.max(4, radius / half));
+  const half = TAN_HALF * Math.min(1, aspect);
+  return Math.min(400, Math.max(2, radius / half));
 }
 
 // the starting view of the page (also "Reset view")
@@ -1100,7 +1106,7 @@ el.addEventListener("pointermove", (e) => {
     };
     const before = geom(prev), after = geom({ x: e.clientX, y: e.clientY });
     p.x = e.clientX; p.y = e.clientY;
-    if (before.d > 0 && after.d > 0) S.zoom = Math.min(400, Math.max(4, S.zoom * before.d / after.d));
+    if (before.d > 0 && after.d > 0) S.zoom = Math.min(400, Math.max(2, S.zoom * before.d / after.d));
     pan(after.cx - before.cx, after.cy - before.cy);
     redraw();
     return;
@@ -1110,7 +1116,7 @@ el.addEventListener("pointermove", (e) => {
   gesture.moved = true;
   const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
   if (gesture.button === 2) {
-    S.zoom = Math.min(400, Math.max(4, S.zoom * Math.exp(-dy * 0.01)));
+    S.zoom = Math.min(400, Math.max(2, S.zoom * Math.exp(-dy * 0.01)));
     redraw();
   } else if (gesture.button === 1 || gesture.pan) {
     pan(dx, dy);
@@ -1124,7 +1130,7 @@ el.addEventListener("pointermove", (e) => {
   }
 });
 function pan(dx, dy) {
-  const h = 2 * S.zoom * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const h = 2 * S.zoom * TAN_HALF;
   const s = h / el.clientHeight;
   S.center.add(new THREE.Vector3(-dx * s, dy * s, 0).applyQuaternion(rot.quaternion.clone().invert()));
   redraw(); scheduleContour();
@@ -1154,7 +1160,7 @@ el.addEventListener("pointerup", endPointer);
 el.addEventListener("pointercancel", endPointer);
 el.addEventListener("wheel", (e) => {
   e.preventDefault();
-  if (e.ctrlKey) { S.zoom = Math.min(400, Math.max(4, S.zoom * Math.exp(e.deltaY * 0.01))); redraw(); return; }
+  if (e.ctrlKey) { S.zoom = Math.min(400, Math.max(2, S.zoom * Math.exp(e.deltaY * 0.01))); redraw(); return; }
   const m = S.maps.find((x) => x.visible);
   if (m) changeLevel(m, (e.shiftKey ? 0.5 : 0.1) * (e.deltaY > 0 ? -1 : 1));
 }, { passive: false });
