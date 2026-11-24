@@ -1135,10 +1135,7 @@ el.addEventListener("pointermove", (e) => {
   if (!gesture.moved && Math.hypot(e.clientX - gesture.x0, e.clientY - gesture.y0) < (gesture.touch ? 8 : 3)) return;
   gesture.moved = true;
   const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
-  if (gesture.button === 2) {
-    S.zoom = Math.min(400, Math.max(2, S.zoom * Math.exp(-dy * 0.01)));
-    redraw();
-  } else if (gesture.button === 1 || gesture.pan) {
+  if (gesture.button === 1 || gesture.button === 2 || gesture.pan) {   // right button = two-finger click on a trackpad
     pan(dx, dy);
   } else {
     const axis = new THREE.Vector3(dy, dx, 0);
@@ -1180,11 +1177,16 @@ function endPointer(e) {
 }
 el.addEventListener("pointerup", endPointer);
 el.addEventListener("pointercancel", endPointer);
-el.addEventListener("wheel", (e) => {   // two-finger scroll (or the wheel) pans like a page; pinch arrives as Ctrl+wheel
+let wheelLevel = null;   // unrounded level while scrolling, so small trackpad steps add up
+el.addEventListener("wheel", (e) => {   // two-finger scroll (or the wheel) sets the level of the first visible map; pinch arrives as Ctrl+wheel
   e.preventDefault();
   if (e.ctrlKey) { S.zoom = Math.min(400, Math.max(2, S.zoom * Math.exp(e.deltaY * 0.01))); redraw(); return; }
+  const m = activeMap();
+  if (!m) return;
   const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1;
-  pan(-e.deltaX * unit, -e.deltaY * unit);
+  if (!wheelLevel || wheelLevel.m !== m || Math.abs(wheelLevel.v - m.level) > 0.01) wheelLevel = { m, v: m.level };
+  wheelLevel.v = Math.min(levelRange(m)[1], Math.max(0.1, wheelLevel.v * Math.exp(-e.deltaY * unit * 0.0015)));
+  setLevel(m, wheelLevel.v, "wheel");
 }, { passive: false });
 window.addEventListener("keydown", (e) => {
   if (e.target.closest && e.target.closest("input, select")) return;
