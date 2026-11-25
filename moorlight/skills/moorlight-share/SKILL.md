@@ -49,7 +49,7 @@ whole job should take about 30 s: run the command, publish, reply. You never wri
 - Single options given later win.
 - `--plane` with a new name adds a plane; with an existing name it replaces that plane in place (e.g. to add
   `copies`). `--no-plane NAME` removes one.
-- `--label` and `--distance` add to what is already there.
+- `--label` and `--distance` add to what is already there; `--no-label SPECS` and `--no-distance "A, B"` remove.
 
 ## Options
 
@@ -76,7 +76,7 @@ whole job should take about 30 s: run the command, publish, reply. You never wri
 |---|---|
 | `copies=-1,1` | parallel copies at these offsets (Å), named "NAME −1 Å" and "NAME +1 Å" |
 | `toward=SPEC` | the side the normal points to, and so where + offsets and copies go. Give an atom well off the plane, e.g. one the change moves towards |
-| `perpendicular-to=PLANE` | a plane perpendicular to PLANE (an earlier plane's name, or atoms). It contains the line through NAME's atoms and passes through `center=` |
+| `perpendicular-to=PLANE` | a plane perpendicular to PLANE (an earlier plane's name, or atoms). It contains the line through NAME's atoms and passes through `center=`. For a curved chain, give the two end atoms of the stretch you mean (`RET C7, A/216 NZ`), not every atom |
 | `thickness=2` | a slab (Å, full width) that shows the strongest value within it |
 | `center=SPEC` | moves the plane to pass through this atom |
 | `offset=1` | moves the plane along its normal (Å) |
@@ -84,7 +84,7 @@ whole job should take about 30 s: run the command, publish, reply. You never wri
 | `map=NAME`, `level=L` | the map and level the plane starts with |
 
 A coordination plane with five or more ligands goes through the four that lie flattest with the metal (its
-equatorial plane). A non-planar site, such as a tetrahedral zinc, gets a slab thick enough to take in all its
+equatorial plane), preferring ligands of the metal's own residue: a haem iron gives the porphyrin plane. A non-planar site, such as a tetrahedral zinc, gets a slab thick enough to take in all its
 ligands.
 
 **Examples:**

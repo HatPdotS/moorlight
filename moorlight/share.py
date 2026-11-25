@@ -773,7 +773,10 @@ class Share:
                 use = list(range(len(ligands)))
                 if len(ligands) >= 5 and p.get("equatorial", True):
                     # octahedral and higher: the four ligands that lie flattest with the metal (equatorial plane)
-                    use = list(min(itertools.combinations(use, 4), key=lambda q: _plane_rms(np.vstack([xyz, lx[list(q)]]))))
+                    own_res = self._residue_key(number, idx[0])
+                    same = [self._residue_key(nb, i) == own_res for nb, i, _ in ligands]
+                    use = list(min(itertools.combinations(use, 4), key=lambda q: _plane_rms(np.vstack([xyz, lx[list(q)]]))
+                                   + 0.1 * (4 - sum(same[j] for j in q))))
                 pts = np.vstack([xyz, lx[use]])
                 centre = xyz[0]
                 lig_atoms = [ligands[j] for j in use]
@@ -977,6 +980,10 @@ class Share:
             p(f"opens on {c}, {2 * v['radius']:g} A across the screen" + (", face-on" if v["_plane"] else ""))
             if v["labels"]:
                 p("  labels: " + ", ".join(self.atoms.name(nb, i) for nb, i in v["labels"]))
+            if v["distances"]:
+                p("  distances: " + ", ".join(
+                    f"{self.atoms.name(*a)} - {self.atoms.name(*b)} "
+                    f"{np.linalg.norm(self._atom_xyz(*a) - self._atom_xyz(*b)):.2f} A" for a, b in v["distances"]))
         for x in self.maps:
             u = x.unit_label or x.units
             p(f"map {x.name!r} [{'difference' if x.kind == 'diff' else 'density'}]: "
@@ -1205,6 +1212,12 @@ class Share:
                 out.append((self.atoms.name(number, i), d, xyz))
         out.sort(key=lambda t: t[1])
         return out if with_xyz else [t[:2] for t in out]
+
+    def _residue_key(self, number, i):
+        """(model, chain, number, icode) of an atom on the page; neighbour copies count as other residues."""
+        if number > len(self.mols):
+            return (number, i)
+        return (number,) + tuple(self.mols[number - 1].info[i][:3])
 
     def _element(self, number, i):
         if number <= len(self.mols):
@@ -1737,6 +1750,8 @@ def build_main(argv, prog="moorlight-share"):
                                                                "starting centre (much smaller files; e.g. 15)")
     ap.add_argument("--label", action="append", default=[], metavar="SPECS", help="atoms to label (comma-separated)")
     ap.add_argument("--distance", action="append", default=[], metavar="A, B", help="a distance to draw")
+    ap.add_argument("--no-label", action="append", default=[], metavar="SPECS", help="remove labels given earlier")
+    ap.add_argument("--no-distance", action="append", default=[], metavar="A, B", help="remove a distance given earlier")
     ap.add_argument("--show", action="append", default=[], metavar="MAP", help="show this map at the start")
     ap.add_argument("--hide", action="append", default=[], metavar="MAP", help="hide this map at the start")
     ap.add_argument("--drop", action="append", default=[], metavar="MAP", help="leave this map out of the page")
@@ -1804,6 +1819,12 @@ def build_main(argv, prog="moorlight-share"):
             if len(pair) != 2:
                 raise ValueError(f"--distance {t!r}: give two atoms, 'A, B'")
             view.setdefault("distances", []).append(pair)
+        gone = {x.strip() for t in a.no_label for x in t.split(",") if x.strip()}
+        if gone:
+            view["labels"] = [x for x in view.get("labels", []) if x not in gone]
+        for t in a.no_distance:
+            pair = {x.strip() for x in t.split(",") if x.strip()}
+            view["distances"] = [d for d in view.get("distances", []) if set(d) != pair]
         spec["command"] = [os.path.abspath(f.partition("=")[0]) + f.partition("=")[1] + f.partition("=")[2]
                            if os.path.exists(f.partition("=")[0]) else f for f in a.inputs]
         opts, k = [x for x in argv if x not in a.inputs], 0
@@ -1882,7 +1903,7 @@ def main(argv=None):
                     help="with --check: map values at these atoms or residues (comma-separated, or repeat --at)")
     ap.add_argument("--near", action="append", default=[], metavar="SPEC",
                     help="with --check: peaks of every difference map around an atom, residue or 'x,y,z' (repeatable)")
-    ap.add_argument("--radius", type=float, default=5.0, help="with --near: radius in A (default 5)")
+    ap.add_argument("--radius", "--near-radius", type=float, default=5.0, help="with --near: radius in A (default 5)")
     ap.add_argument("--peaks", type=int, default=12, help="with --check: peaks listed per map and sign")
     ap.add_argument("--stop-peaks", type=int, default=8, help="with --check: peaks listed per stop, map and sign")
     ap.add_argument("--map", action="append", default=[], dest="maps", metavar="NAME",
