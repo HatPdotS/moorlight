@@ -17,7 +17,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from . import edit
-from .maps import XMap, detect_columns, check_columns, guess_kind, DEFAULT_VISIBLE
+from .maps import XMap, detect_columns, check_columns, guess_kind, split_weight, DEFAULT_VISIBLE
 from .model import BondOrders, Molecule
 
 COMMANDS: dict[str, dict] = {}
@@ -405,7 +405,7 @@ class Session:
             new.append(x)
             if self.refinement_map is None and kind == "2fofc" and f not in ("F-model", "Fc_dark", "Fc_light"):
                 self.refinement_map = x.id
-            if self.diff_map is None and f in ("WDF", "DF"):
+            if self.diff_map is None and split_weight(f)[0] in ("WDF", "DF", "dF"):
                 self.diff_map = x.id
         self.push_maps()
         self.say(f"{os.path.basename(p)}: " + ", ".join(f"[{x.id}] {x.name}" for x in new))

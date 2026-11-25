@@ -39,7 +39,11 @@ and scipy). There is no server and no port.
    - **Maps:** `.ccp4`, `.map` or `.mrc`, or an `.mtz` of map coefficients.
      - An MTZ gives every map a refinement program writes for viewing: 2mFo-DFc and mFo-DFc (FWT/DELFWT,
        2FOFCWT/FOFCWT, ...).
-     - `file.mtz=name:F,PHI` picks two columns; `file.ccp4=name` names a map.
+     - TorchRef difference refinement (`difference_data.mtz`): the light − dark map dF on the dark phases,
+       q-weighted (`dF*W_Q,PHDELWT`; also W_InVa-weighted and unweighted), and the extrapolated light map
+       (FWT/PHWT there is 2Fext − Fc, not 2mFo-DFc). Its `*_dark-sf.mtz` gives the dark 2mFo-DFc and mFo-DFc.
+     - `file.mtz=name:F,PHI` picks two columns; `F*W` weights the amplitudes by a weight column
+       (`file.mtz=name:dF*W_Q,PHDELWT`). `file.ccp4=name` names a map.
    - **Map kind** (`2fofc` = density in blue, `diff` = green +/red −) is taken from the MTZ columns or the file name.
      Otherwise it is guessed from the values: a density map has almost nothing below −2.5 rms. `init` prints the
      kinds; correct a wrong one in the spec.
@@ -54,13 +58,15 @@ and scipy). There is no server and no port.
        maps or levels changes all planes. A plane's `map` and `level` (`init` sets the first difference map) are
        only its start: they apply while that map is the one in use and its level has not been moved.
      - Without `--plane`, `init` adds up to `--planes` (default 5) automatic planes:
-       - at the strongest features of the first difference map (peaks beyond `--min`, default 2.5 × its level,
-         within 1.5 Å of an atom);
-       - with no difference map or no such features: through the ligands and the coordination of metal ions.
+       - at the strongest features of the first difference map (peaks beyond `--min`, default 1.5 × its level,
+         within 1.5 Å of an atom); a residue present in several models (dark and light) gives one plane;
+       - with no difference map or no such features: through the ligands, the most buried first (a bound
+         chromophore or inhibitor before surface lipids and additives), and the coordination of metal ions.
+     - With `--planes 0` and no `--plane`, there are none; add them to the spec later.
 2. **Edit the spec** when the user asks for something else: another plane, a different centre, colour or level.
    - When they ask for a plane ("through the azo N and the ring carbons", "perpendicular to that, through Pd1",
      "a stack 1 Å apart"), add it to `planes`, check, build, and republish to the same artifact.
-3. **Check**: `moorlight-share spec.json --check [--at SPEC ...] [--near SPEC --radius R [--frame "A, B, C"]]`.
+3. **Check**: `moorlight-share spec.json --check [--at "SPEC, SPEC"] [--near SPEC --radius R [--frame "A, B, C"]]`.
    - It prints:
      - each map's grid and strongest peaks of each sign, each listed once next to the model with its nearest atom;
      - for each plane:
@@ -71,9 +77,9 @@ and scipy). There is no server and no port.
        - the peaks in the slice.
 
        Three atoms always give rms 0. Use four or more to judge flatness.
-     - `--at`: values at atoms.
-     - `--near`: atoms and every map's peaks around a point. With `--frame "A, B, C"`, it also prints each atom's
-       and peak's height `h` above those atoms' plane.
+     - `--at`: values of every map at these atoms or residues (comma-separated, or repeat `--at`).
+     - `--near`: the atoms around a point, one line per residue, and every map's peaks there. With
+       `--frame "A, B, C"`, it also prints each atom's and peak's height `h` above those atoms' plane.
    - `--map NAME` limits it to one map.
    - `spec.check.txt` from `init` describes the spec as `init` wrote it; after edits, run `--check` again.
    - **Read the warnings.** A map that covers only part of the cell shows its mean outside its extent.
@@ -150,7 +156,7 @@ and scipy). There is no server and no port.
   - `visible`;
   - `neighbours` (default true).
 - **maps**:
-  - `path`: a CCP4/MRC map, or an MTZ with `columns: "F,PHI"`.
+  - `path`: a CCP4/MRC map, or an MTZ with `columns: "F,PHI"` (or `"F*W,PHI"`: amplitudes times a weight column).
   - `name`: unique; planes refer to it.
   - `kind`: `diff`, or `2fofc` (also `density`).
   - `units`, `level`, `visible`, `color`.
@@ -179,6 +185,8 @@ and scipy). There is no server and no port.
 
     `center` may also be given with `atoms` to move the plane's centre.
   - `axis`: two atom specs that set the plane's horizontal direction.
+  - `toward`: an atom spec (or point) on the side the normal should point to. A best plane's normal otherwise
+    points to an arbitrary side; `offset` and `copies` count along the normal, and `--check` prints it.
   - `offset`: Å along the normal.
   - `copies`: extra parallel planes at these offsets from it (Å, e.g. `[-1, 1]`), named "<name> +1 Å".
   - `thickness`: Å. A thick slice shows the strongest value within it, with its sign kept.

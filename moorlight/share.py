@@ -41,7 +41,7 @@ import gemmi
 import numpy as np
 from scipy.spatial import cKDTree
 
-from .maps import DEFAULT_VISIBLE, SymMapper, detect_columns, check_columns, guess_kind
+from .maps import DEFAULT_VISIBLE, SymMapper, detect_columns, check_columns, guess_kind, map_from_mtz
 from .model import Molecule
 from .session import parse_atom_spec
 
@@ -346,7 +346,7 @@ def read_map(spec, base):
                 raise ValueError(f"{p}: no map columns found; give \"columns\": \"F,PHI\"")
             f, phi, kind, _ = found[0]
         sample = float(spec.get("sample_rate", 3.0))
-        return mtz.transform_f_phi_to_map(f, phi, sample_rate=sample), spec.get("kind", kind)
+        return map_from_mtz(mtz, f, phi, sample), spec.get("kind", kind)
     raise ValueError(f"{p}: unknown map format (use .ccp4/.map/.mrc or .mtz)")
 
 
@@ -668,8 +668,9 @@ class Share:
     def plane(self, p, k):
         """Preset slice plane: the best plane through `atoms` (three or more), through an atom and the atoms within
         `cutoff` of it (`coordination`: a metal's coordination plane), or `center` with a `normal` (a vector, or two
-        atom specs from the first to the second). `axis` (two atom specs) sets its horizontal direction; `offset`
-        moves it along the normal; `thickness`, `radius`, `map`, `level`, `color`, `visible`."""
+        atom specs from the first to the second). `toward` (atom spec or point) turns the normal to that side;
+        `axis` (two atom specs) sets its horizontal direction; `offset` moves it along the normal; `thickness`,
+        `radius`, `map`, `level`, `color`, `visible`."""
         where = f"plane {k + 1} ({p.get('name', '')!r})"
         try:
             rms, pts, centre, ligands, shift = None, None, None, None, 0.0
@@ -720,6 +721,8 @@ class Share:
             else:
                 raise ValueError("give \"atoms\" (three or more), \"coordination\" (one atom), or \"center\" and "
                                  "\"normal\"")
+            if p.get("toward") is not None and (self.atoms.point(p["toward"]) - centre) @ n < 0:
+                n, ey = -n, -ey                  # offsets and copies count towards that side
             if p.get("axis"):
                 a, b = p["axis"]
                 d = self.atoms.point(b) - self.atoms.point(a)
@@ -939,14 +942,20 @@ class Share:
             c = self.atoms.point(_maybe_xyz(spec))
             p(f"\nnear {spec!r} = ({c[0]:.2f}, {c[1]:.2f}, {c[2]:.2f}), within {near_radius:g} A"
               + (f"; h = height above the plane of {frame}" if fplane is not None else "") + ":")
-            p("  atoms (distance" + (", h" if fplane is not None else "") + "): " + ", ".join(
-                f"{nm} {d:.2f}" + (f" h {float((xyz - fplane[0]) @ fplane[1]):+.2f}" if fplane is not None else "")
-                for nm, d, xyz in self.atoms_near(c, near_radius, with_xyz=True)))
+            p("  atoms by residue, nearest first (atom distance" + (", h" if fplane is not None else "") + "):")
+            residues = {}
+            for nm, d, xyz in self.atoms_near(c, near_radius, with_xyz=True):
+                res, _, rest = nm.partition(" ")
+                atom, _, tag = rest.partition(" ")
+                residues.setdefault(f"{res} {tag}".strip(), []).append(
+                    f"{atom} {d:.2f}" + (f" h {float((xyz - fplane[0]) @ fplane[1]):+.2f}" if fplane is not None else ""))
+            for res, items in residues.items():
+                p(f"    {res:<24} " + ", ".join(items))
             for x in self.maps:
                 if not (maps_only and x.name not in maps_only):
                     p(f"  {x.name}:")
                     out.extend(self._peak_lines(x, c, near_radius, x.level, near, fplane, limit=max(12, stop_peaks)))
-        for spec in at:
+        for spec in (t.strip() for a in at for t in a.split(",") if t.strip()):
             number, idx, xyzs = self.atoms.resolve(spec, first_conformer=False)
             p(f"\nvalues at {spec!r}:")
             for i, xyz in zip(idx, xyzs):
@@ -1045,10 +1054,10 @@ def _feature_planes(sh, x, thr, n):
         inf = sh.mols[f[2] - 1].info[f[3]]
         rkey = tuple(inf[:4])
         big = len(size[(f[2], rkey)]) > 5
-        if big or inf[3] not in WATERS:
-            groups.setdefault((f[2], rkey) if big else (f[2], "name", inf[3]), []).append(f)
+        if big or inf[3] not in WATERS:        # the same residue in several models (dark, light) is one group
+            groups.setdefault(rkey if big else ("name", inf[3]), []).append(f)
     ranked = sorted(groups.items(), key=lambda kv: -kv[1][0][0])[:n]
-    ranked.sort(key=lambda kv: (kv[0][1] == "name", -kv[1][0][0]))   # residues of their own first
+    ranked.sort(key=lambda kv: (kv[0][0] == "name", -kv[1][0][0]))   # residues of their own first
     planes = []
     for gkey, fs in ranked:
         top = fs[0]
@@ -1070,28 +1079,38 @@ def _feature_planes(sh, x, thr, n):
 
 
 def _ligand_planes(sh, n):
-    """Preset planes through the ligands (residues that are neither polymer nor water, largest first), then the
-    coordination of single-atom residues (metals, ions) that have two or more atoms within 2.6 A."""
+    """Preset planes through the ligands (residues that are neither polymer nor water), the most buried first (the
+    fraction of their atoms within 4 A of the model's polymer; then the largest), so a bound chromophore or inhibitor
+    comes before surface lipids and additives. Then the coordination of single-atom residues (metals, ions) that have
+    two or more atoms within 2.6 A. A residue present in several models (dark and light) is used once."""
     ligands, ions = [], []
     drawn = None
+    seen = set()
     for k, m in enumerate(sh.mols, 1):
-        residues = {}
+        residues, polymer = {}, []
         for i, (inf, e) in enumerate(zip(m.info, m.elements)):
             if e != "H" and inf[3] not in WATERS and inf[5] in ("", "A"):
                 residues.setdefault(tuple(inf[:4]), []).append(i)
         for rkey, idx in residues.items():
             tab = gemmi.find_tabulated_residue(rkey[3])
             if tab is not None and (tab.is_amino_acid() or tab.is_nucleic_acid()):
+                polymer.extend(idx)
+        tree = cKDTree(m.xyz[polymer]) if polymer else None
+        for rkey, idx in residues.items():
+            tab = gemmi.find_tabulated_residue(rkey[3])
+            if tab is not None and (tab.is_amino_acid() or tab.is_nucleic_acid()) or rkey in seen:
                 continue
+            seen.add(rkey)
             name = f"{rkey[3]} {rkey[1]}{rkey[2]}"
             if len(idx) >= 3:
-                ligands.append((len(idx), {"name": name, "atoms": [_residue_spec(sh, k, idx[0])]}))
+                buried = float(np.mean(tree.query(m.xyz[idx])[0] <= 4.0)) if tree is not None else 0.0
+                ligands.append(((round(buried, 1), len(idx)), {"name": name, "atoms": [_residue_spec(sh, k, idx[0])]}))
             elif len(idx) == 1:
                 drawn = drawn if drawn is not None else np.array([xyz for *_, xyz in sh._drawn()])
                 if np.sum((np.linalg.norm(drawn - m.xyz[idx[0]], axis=1) > 0.1)
                           & (np.linalg.norm(drawn - m.xyz[idx[0]], axis=1) <= 2.6)) >= 2:
                     ions.append({"name": f"{name} coordination", "coordination": _residue_spec(sh, k, idx[0], atom=True)})
-    return ([p for _, p in sorted(ligands, key=lambda t: -t[0])] + ions)[:n]
+    return ([p for _, p in sorted(ligands, key=lambda t: (-t[0][0], -t[0][1]))] + ions)[:n]
 
 
 def _requested_plane(sh, text):
@@ -1149,10 +1168,16 @@ def init_spec(models, maps, title=None, units="sigma", unit_label=None, level=No
     n_auto = (0 if planes else 5) if n_planes is None else n_planes
     auto = []
     if diff is not None and n_auto:
-        auto = _feature_planes(sh, diff, float(min_peak if min_peak is not None else 2.5 * diff.level), n_auto)
+        auto = _feature_planes(sh, diff, float(min_peak if min_peak is not None else 1.5 * diff.level), n_auto)
     if not auto and n_auto:
         auto = _ligand_planes(sh, n_auto)
     spec["planes"] += auto
+    names = [pl["name"] for pl in spec["planes"]]
+    for pl in spec["planes"]:
+        if names.count(pl["name"]) > 1:
+            first = str((pl.get("atoms") or [pl.get("coordination") or ""])[0])
+            k = int(first.split("#")[0]) if "#" in first else 1
+            pl["name"] += f" ({spec['models'][k - 1]['name']})"
     if shown is not None:
         for pl in spec["planes"]:
             pl["map"] = shown.name
@@ -1186,7 +1211,8 @@ def init_main(argv):
     ap.add_argument("--units", choices=["sigma", "absolute"], default="sigma")
     ap.add_argument("--unit-label", help="text after levels, e.g. SD for maps in noise SD (with --units absolute)")
     ap.add_argument("--level", type=float, help="contour level of the difference maps (default 3 sigma)")
-    ap.add_argument("--min", type=float, dest="min_peak", help="features from this level on (default 2.5 x level)")
+    ap.add_argument("--min", type=float, dest="min_peak", help="automatic planes: features from this level on "
+                                                                 "(default 1.5 x the difference map's level)")
     ap.add_argument("--build", metavar="PAGE", help="also build the page")
     a = ap.parse_args(argv)
     out_dir = os.path.dirname(os.path.abspath(a.out))
@@ -1306,7 +1332,7 @@ def main(argv=None):
     ap.add_argument("-o", "--out", help="output page (.html); default: next to the spec")
     ap.add_argument("--check", action="store_true", help="print what the page shows (peaks, planes, values at atoms); no page")
     ap.add_argument("--at", action="append", default=[], metavar="SPEC",
-                    help="with --check: map values at these atoms or residues (repeatable)")
+                    help="with --check: map values at these atoms or residues (comma-separated, or repeat --at)")
     ap.add_argument("--near", action="append", default=[], metavar="SPEC",
                     help="with --check: peaks of every difference map around an atom, residue or 'x,y,z' (repeatable)")
     ap.add_argument("--radius", type=float, default=5.0, help="with --near: radius in A (default 5)")
