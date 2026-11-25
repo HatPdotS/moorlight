@@ -33,8 +33,9 @@ whole job should take about 30 s: run the command, publish, reply. You never wri
    - **What it prints:**
      - the page size and the starting view;
      - each map (shown or hidden, level, rms);
-     - the strongest difference features near the centre, with their nearest atoms;
-     - every plane with its fit and the features in it.
+     - the strongest difference features near the centre, with their nearest atoms (`A/93 LEU CG`);
+     - every plane with its fit, and for each difference map: the signal at the plane's own atoms (rms, min, max),
+       which tells which group changes most, and the features in the slice.
 
      That is the content of your reply.
 2. **Publish** DIR/page.html with the Artifact tool: icon "molecule", a one-sentence description. For a file to
@@ -46,7 +47,9 @@ whole job should take about 30 s: run the command, publish, reply. You never wri
 **Follow-ups:** for "add a slice…", "open on…", "show the other map", "label…", run
 `moorlight-share again DIR/page.spec.json [more options]` and republish the same file path, which keeps the link.
 - Single options given later win.
-- `--plane`, `--label` and `--distance` add to what is already there.
+- `--plane` with a new name adds a plane; with an existing name it replaces that plane in place (e.g. to add
+  `copies`). `--no-plane NAME` removes one.
+- `--label` and `--distance` add to what is already there.
 
 ## Options
 
@@ -55,13 +58,15 @@ whole job should take about 30 s: run the command, publish, reply. You never wri
 | `--title`, `--description` | page name (two to four words, no "Name: explanation") and one line under it |
 | `--center SPECS` | what the page opens on, face-on (comma-separated specs). A metal gets its ligands labelled, with distances. Default: the `--plane` atoms, else the strongest difference feature, else the most buried ligand |
 | `--radius R` | Å from the centre to the screen edge at the start |
-| `--plane "NAME=SPECS; ..."` | a preset slice plane (repeatable). Three or more atoms (or a residue) give their best plane; one atom (`Zn site=ZN`) gives its coordination plane |
+| `--plane "NAME=SPECS; ..."` | a preset slice plane (repeatable). Three or more atoms (or a residue) give their best plane; one metal atom (`Zn site=ZN`) gives its coordination plane; one other atom gives the plane through it and its bonded neighbours |
+| `--no-plane NAME` | remove a plane (with `again`) |
 | `--label SPECS`, `--distance "A, B"` | labels and distance lines at the start (repeatable) |
 | `--show MAP`, `--hide MAP` | which maps are on at the start. MAP is the name or a unique part of it. By default one density and one difference map are on |
 | `--drop MAP` | leave a map out (smaller page) |
 | `--level 4`, `--level "MAP=1.2"` | contour level: of all difference maps, or of one map |
 | `--units absolute --unit-label SD` | maps already in their own units, e.g. noise SD. Give `--level` too (e.g. 4) |
 | `--standalone` | a full HTML document to send as a file. It opens offline in any current browser |
+| `--around R` | store the maps only within about R Å of the starting centre. Much smaller files (e.g. `--around 15` for e-mail). Density is then missing further out |
 | `--at "SPECS"`, `--near SPEC [--near-radius R]` | also print map values at atoms, or the atoms (one line per residue) and peaks around a point |
 | `--planes N`, `--min L` | automatic planes when no `--plane` is given (default 5, at features beyond 1.5 × the level) |
 

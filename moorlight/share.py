@@ -316,7 +316,7 @@ class Atoms:
             k = next(kk for kk, nn in self.nb_number.items() if nn == number)
             nb = self.nb[k]
             a, tag = nb.mol.info[nb.orig[i]], nb.tags[i]
-        spec = f"{a[0]}/{a[1]}{a[2]} {a[4]}" + (f":{a[5]}" if a[5] else "")
+        spec = f"{a[0]}/{a[1]}{a[2]} {a[3]} {a[4]}" + (f":{a[5]}" if a[5] else "")
         if len(self.mols) > 1:
             spec = f"{k}#{spec}"
         return spec + (f" [{tag}]" if tag else "")
@@ -356,6 +356,9 @@ class Atoms:
             if r not in seen:
                 seen.append(r)
         return ", ".join(seen[:limit]) + (" ..." if len(seen) > limit else "")
+
+
+NON_METALS = ("C", "N", "O", "S", "P", "H", "SE", "CL", "BR", "I", "F", "B", "SI")
 
 
 def coordination_cutoff(element):
@@ -654,6 +657,7 @@ class Share:
                 name = f"{base} {sign}{abs(o):g} \u00c5"
                 self.planes.append(self.plane({**p, "name": name, "offset": float(p.get("offset", 0)) + float(o),
                                                "color": None}, k))
+                self.planes[-1]["_copy"] = True
 
     def region(self):
         """Box for maps that are resampled (grid 'box'): all models plus a margin, or a cube around a centre."""
@@ -736,7 +740,7 @@ class Share:
         [] for other atoms."""
         number, idx, xyz = self.atoms.resolve(spec)
         el = self._element(number, idx[0]) if len(idx) == 1 else "C"
-        if el.upper() in ("C", "N", "O", "S", "P", "H", "SE", "CL", "BR", "I", "F"):
+        if el.upper() in NON_METALS:
             return []
         cut = coordination_cutoff(el)
         fam = self.atoms.family(number)
@@ -757,7 +761,8 @@ class Share:
                 number, idx, xyz = self.atoms.resolve(p["coordination"])
                 if len(idx) != 1:
                     raise ValueError("\"coordination\" is one atom, e.g. \"A/301 ZN\"")
-                cut = float(p.get("cutoff") or coordination_cutoff(self._element(number, idx[0])))
+                el = self._element(number, idx[0])     # a metal: its ligands; another atom: its bonded neighbours
+                cut = float(p.get("cutoff") or (1.9 if el.upper() in NON_METALS else coordination_cutoff(el)))
                 fam = self.atoms.family(number)          # another model's copy of the site is not a ligand
                 ligands = [(nb, i, float(np.linalg.norm(x - xyz[0]))) for nb, i, x in self._drawn()
                            if nb in fam and 0.1 < np.linalg.norm(x - xyz[0]) <= cut]
@@ -856,6 +861,19 @@ class Share:
             if h.max() > 0.5:
                 thick = float(min(4.0, np.ceil((2 * h.max() + 0.3) * 10) / 10))
         p0 = centre + n * float(p.get("offset", 0.0))
+        own = []                                   # the atoms that define the plane: (name, xyz)
+        try:
+            if p.get("coordination"):
+                number, idx, xyz = self.atoms.resolve(p["coordination"])
+                own = [(self.atoms.name(number, idx[0]), xyz[0])] + [
+                    (self.atoms.name(nb, i), self._atom_xyz(nb, i)) for nb, i, _ in lig_atoms]
+            else:
+                for sp in p.get("atoms") or []:
+                    number, idx, xyz = self.atoms.resolve(sp)
+                    own += [(self.atoms.name(number, i), x) for i, x in zip(idx, xyz)]
+        except (ValueError, KeyError, NameError):
+            own = []
+        own = [(nm, float((x - p0) @ n), x) for nm, x in own]
         color = p.get("color")
         if isinstance(color, str):
             color = int(color.lstrip("#"), 16)
@@ -863,7 +881,8 @@ class Share:
         return {"name": p.get("name") or f"Preset {k + 1}", "p0": r3(p0), "ex": r3(ex), "ey": r3(ey), "n": r3(n),
                 "r": float(p.get("radius", self.spec.get("contour_radius", 10.0))),
                 "thick": thick, "map": name, "level": p.get("level"), "color": color,
-                "visible": bool(p.get("visible", True)), "_rms": rms, "_ligands": ligands, "_shift": shift}
+                "visible": bool(p.get("visible", True)), "_rms": rms, "_ligands": ligands, "_shift": shift,
+                "_own": own}
 
     def payload(self):
         mols = []
@@ -988,16 +1007,26 @@ class Share:
             if pl["_ligands"]:
                 used = [f"{nm} {d:.2f}" for nm, d, u_ in pl["_ligands"] if u_]
                 line += "; ligands " + ", ".join(used)
-            x = next((m for m in self.maps if m.name == pl["map"]), None) or diff
-            if x is not None and x.kind == "diff":
-                pk = self.slice_peaks(pl, x)
-                c = np.array(pl["p0"])
-                pk = [t for t in pk if np.linalg.norm(t[0] - c) <= 6.0][:3]
-                u = x.unit_label or x.units
-                if pk:
-                    line += "; in the slice near its centre: " + ", ".join(
-                        f"{val:+.1f} {u} at {near(q)[0]}" for q, val, _ in pk)
+            hs = [h for _, h, _ in pl["_own"]] if not pl.get("_copy") else []
+            if hs and max(abs(h) for h in hs) > 0.5:
+                line += f"; its atoms lie {min(hs):+.1f} to {max(hs):+.1f} A off it"
             p(line)
+            diffs = [m for m in self.maps if m.kind == "diff"]
+            for x in diffs:
+                u = x.unit_label or x.units
+                tag = f"    {x.name}: " if len(diffs) > 1 else "    "
+                parts = []
+                if pl["_own"] and not pl.get("_copy"):
+                    vals = np.array([x.value_at(xyz) for _, _, xyz in pl["_own"]])
+                    parts.append(f"at its atoms rms {float(np.sqrt(np.mean(vals ** 2))):.1f}, "
+                                 f"from {vals.min():+.1f} to {vals.max():+.1f} {u}")
+                c = np.array(pl["p0"])
+                pk = [t for t in self.slice_peaks(pl, x) if np.linalg.norm(t[0] - c) <= 6.0][:3]
+                if pk:
+                    parts.append("in the slice near its centre: " + ", ".join(
+                        f"{val:+.1f} at {near(q)[0]}" for q, val, _ in pk))
+                if parts:
+                    p(tag + "; ".join(parts))
         return "\n".join(out)
 
     def _peak_lines(self, x, center, radius, level, near, plane=None, limit=8):
@@ -1114,6 +1143,8 @@ class Share:
                 outp = [f"{nm} {d:.2f} A" for nm, d, used in pl["_ligands"] if not used]
                 p("  coordination" + (" (equatorial plane)" if outp else "") + ": " + ", ".join(inp)
                   + ("; out of the plane: " + ", ".join(outp) if outp else ""))
+            if pl["_own"]:
+                p("  its own atoms (h): " + ", ".join(f"{nm} {h:+.2f}" for nm, h, _ in pl["_own"]))
             p(f"  atoms within {half:g} A of it: {len(near_atoms)}" + (": " + ", ".join(
                 f"{nm} {h:+.2f}" for nm, h in near_atoms[:20]) + (" ..." if len(near_atoms) > 20 else "") if near_atoms else ""))
             for x in self.maps:
@@ -1700,7 +1731,10 @@ def build_main(argv, prog="moorlight-share"):
                          "'Zn site=ZN' (one atom: its coordination plane), with options after ';': copies=-1,1  "
                          "toward=SPEC (side of +)  thickness=2  offset=1  axis=A,B  center=SPEC  "
                          "perpendicular-to=PLANE (then the atoms give a line in the plane)  map=NAME  level=4")
+    ap.add_argument("--no-plane", action="append", default=[], metavar="NAME", help="remove a plane given earlier")
     ap.add_argument("--planes", type=int, help="automatic planes when no --plane is given (default 5)")
+    ap.add_argument("--around", type=float, metavar="R", help="store the maps only within about R A of the "
+                                                               "starting centre (much smaller files; e.g. 15)")
     ap.add_argument("--label", action="append", default=[], metavar="SPECS", help="atoms to label (comma-separated)")
     ap.add_argument("--distance", action="append", default=[], metavar="A, B", help="a distance to draw")
     ap.add_argument("--show", action="append", default=[], metavar="MAP", help="show this map at the start")
@@ -1740,9 +1774,19 @@ def build_main(argv, prog="moorlight-share"):
             rel = os.path.relpath(os.path.abspath(path), out_dir) + (eq + name)
             (models if path.lower().endswith(MODEL_EXT) else maps).append(rel)
         diff_level = [float(v) for v in a.level if "=" not in v]
+        planes = {}                       # by name: a later --plane replaces an earlier one in its place
+        for t in a.plane:
+            head = t.split(";")[0]
+            planes[head.partition("=")[0].strip() if "=" in head else head.strip()] = t
+        for n in a.no_plane:
+            if planes.pop(n.strip(), None) is None:
+                raise ValueError(f"--no-plane {n!r}: no such plane; planes: {list(planes)}")
         cache = {}
         spec = init_spec(models, maps, a.title, a.units, a.unit_label, diff_level[-1] if diff_level else None,
-                         a.min_peak, a.planes, a.plane, out_dir, a.description, a.center, a.radius, a.drop, cache)
+                         a.min_peak, a.planes, list(planes.values()), out_dir, a.description, a.center, a.radius,
+                         a.drop, cache)
+        if a.around:
+            spec["region"] = {"center": spec["view"]["center"], "radius": a.around}
         names = [m["name"] for m in spec["maps"]]
         for v in a.level:
             if "=" in v:
@@ -1790,7 +1834,7 @@ def build_main(argv, prog="moorlight-share"):
             return 2
         if a.standalone and size > 7e6:
             print(f"note: {size / 1e6:.1f} MB; e-mail encoding adds a third, so some mail servers (10 MB) will refuse "
-                  "it; --drop a map, or send a link", file=sys.stderr)
+                  "it; add --around 15 (maps only around the site), --drop a map, or send a link", file=sys.stderr)
     except (ValueError, OSError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
