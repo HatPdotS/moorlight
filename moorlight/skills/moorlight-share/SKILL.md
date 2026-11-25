@@ -47,7 +47,7 @@ and scipy). There is no server and no port.
      - Maps already in noise units: `--units absolute --unit-label SD`.
    - **Planes:**
      - `--plane "Benzamidine=A/1"` is the best plane through a residue's heavy atoms.
-     - `--plane "Azo=-/102 C8, -/102 N9, -/102 N10, -/102 C11"` goes through these atoms.
+     - `--plane "Ring=A/401 C1, A/401 N1, A/401 C2, A/401 C3"` goes through these atoms.
      - `--plane "Zn site=A/301 ZN"` (one atom) is that atom's coordination plane.
      - The option is repeatable.
      - In the page every plane shows the map in use (the first visible one) at its slider level, so switching

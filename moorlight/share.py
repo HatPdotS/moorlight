@@ -10,15 +10,15 @@ as a file (e-mail, messenger, a paper's supplement) or published as a claude.ai 
 
 The spec (JSON; paths relative to the spec file):
 
-    {"title": "Cage 3.5 ps",                      # page name, two to four words
+    {"title": "Ligand 10 ps",                     # page name, two to four words
      "description": "one line shown under the title",
      "models": [{"path": "dark.pdb", "name": "dark"}],
-     "maps": [{"path": "3p5ps.ccp4", "name": "3.5 ps light - dark", "kind": "diff",
+     "maps": [{"path": "10ps.ccp4", "name": "10 ps light - dark", "kind": "diff",
                "units": "absolute", "unit_label": "SD", "level": 4.0, "visible": true}],
-     "view": {"center": "-/102", "radius": 8, "orient": "face", "labels": ["-/102 N9"]},
-     "planes": [{"name": "Azo 102", "atoms": ["-/102 C8", "-/102 N9", "-/102 N10", "-/102 C11"],
-                 "thickness": 0.5, "map": "3.5 ps light - dark"},
-                {"name": "Pd site", "coordination": "A/1 PD"}]}
+     "view": {"center": "A/401", "radius": 8, "orient": "face", "labels": ["A/401 N1"]},
+     "planes": [{"name": "Ligand ring", "atoms": ["A/401 C1", "A/401 N1", "A/401 C2", "A/401 C3"],
+                 "thickness": 0.5, "map": "10 ps light - dark"},
+                {"name": "Zn site", "coordination": "A/301 ZN"}]}
 
 See skills/moorlight-share/SKILL.md for every field.
 """
@@ -676,7 +676,7 @@ class Share:
             if p.get("coordination"):
                 number, idx, xyz = self.atoms.resolve(p["coordination"])
                 if len(idx) != 1:
-                    raise ValueError("\"coordination\" is one atom, e.g. \"A/1 PD\"")
+                    raise ValueError("\"coordination\" is one atom, e.g. \"A/301 ZN\"")
                 cut = float(p.get("cutoff") or coordination_cutoff(self._element(number, idx[0])))
                 ligands = [(nb, i, float(np.linalg.norm(x - xyz[0]))) for nb, i, x in self._drawn()
                            if 0.1 < np.linalg.norm(x - xyz[0]) <= cut]
@@ -1178,7 +1178,7 @@ def init_main(argv):
     ap.add_argument("--title", help="page name, two to four words")
     ap.add_argument("--description", help="one line under the title")
     ap.add_argument("--plane", action="append", default=[], metavar="NAME=SPECS",
-                    help="a preset plane: 'Azo=-/102 C8, -/102 N9, -/102 N10' (best plane through the atoms), "
+                    help="a preset plane: 'Ring=A/401 C1, A/401 N1, A/401 C2' (best plane through the atoms), "
                          "'Heme=A/201' (a residue's heavy atoms) or 'Zn site=A/301 ZN' (one atom: its coordination "
                          "plane). Repeatable")
     ap.add_argument("--planes", type=int, default=None, dest="planes",
@@ -1291,7 +1291,7 @@ def main(argv=None):
         return init_main(argv[1:])
     if argv and argv[0] == "list":
         return list_main(argv[1:])
-    # specs may start with '-' (chain '-'): '--at -/102' -> '--at=-/102'
+    # specs may start with '-' (chain '-'): '--at -/1' -> '--at=-/1'
     fixed, k = [], 0
     while k < len(argv):
         if argv[k] in ("--at", "--near", "--frame") and k + 1 < len(argv):
