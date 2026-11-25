@@ -1,238 +1,169 @@
 ---
 name: moorlight-share
-description: Make a self-contained, phone-friendly viewer page for a structure and its maps (models + density/difference maps + preset slice planes) that needs no server, for publishing as a claude.ai artifact or sending as a file. Works for small molecules, proteins and EM maps; inputs PDB/mmCIF and CCP4/MRC maps or MTZ map coefficients. Use when the user wants to look at a structure or map from a phone, a Remote Control session or a link, or asks for planes or slices through a structure.
+description: Make a self-contained, phone-friendly viewer page for a structure and its maps (models + density/difference maps + preset slice planes) that needs no server, for publishing as a claude.ai artifact or sending as a file. One command from files, a refinement folder or a PDB id. Works for small molecules, proteins and EM maps; inputs PDB/mmCIF and CCP4/MRC maps or MTZ map coefficients. Use when the user wants to look at a structure or map from a phone, a Remote Control session or a link, or asks for planes or slices through a structure.
 ---
 
 # Shareable structure viewer pages
 
-`moorlight-share` (the same as `moorlight share`) turns model and map files into one HTML page. The page holds:
-- the models, plus the atoms of neighbouring cells and symmetry copies around them (Coot's symmetry atoms);
-- the maps;
-- a starting view;
-- preset slice planes.
+One command turns a structure and its maps into one self-contained HTML page and prints what the page shows. The
+whole job should take about 30 s: run the command, publish, reply. You never write or edit JSON.
 
-The browser draws everything itself:
-- contours, as marching-cubes mesh (Coot's chicken wire);
-- Olex2-style map slices.
+## Fast path
 
-On the page the viewer can rotate, zoom and pan, switch maps and set their levels with sliders, and tap atoms for
-labels and map values. They can hide the structure, and move, tilt, thicken, fix, save and copy slice planes. It is a
-viewer, not a presentation: there are no stops or texts.
+1. **Run one command** (about 3–5 s):
 
-**Running it.** Use `moorlight-share ...`. If that is not on PATH, use `moorlight share ...` or
-`python -m moorlight share ...` from an environment where the `moorlight` package is installed (it needs gemmi, numpy
-and scipy). There is no server and no port.
+   ```
+   moorlight-share INPUTS --title "Two to four words" [--center SPECS] [--plane "NAME=SPECS[; option=value]" ...] -o DIR/page.html
+   ```
 
-## Workflow
+   - **INPUTS** is one of:
+     - a refinement folder. Moorlight recognises:
+       - TorchRef difference refinement: dark and light models, the q-weighted light − dark map, the extrapolated light map, and the dark 2mFo-DFc and mFo-DFc maps;
+       - TorchRef refinement output;
+       - any folder with one model and its maps.
+     - model and map files (`.pdb/.cif`, `.mtz/.ccp4/.map/.mrc`), optionally named: `dark.pdb=dark`, `2ns.ccp4="2 ns"`.
+     - a PDB id (`3hs4`), which downloads the PDB-REDO model and maps into DIR.
+   - **Atom specs** come in these forms:
+     - `A/85 CA` is an atom; `A/85` is a residue (all its heavy atoms);
+     - `2#A/85 SG` is an atom in model 2 (the default is model 1);
+     - `A/85 CA:B` is altloc B;
+     - a residue name (`RET`, `ZN`, `AZM C1`) also works. If there are several copies, the most buried one is used.
 
-0. **Look up the residues**: `moorlight-share list MODEL` prints, as atom specs:
-   - the chains with their residue ranges;
-   - the ligands, grouped by name;
-   - metals and ions, with the number of atoms around each;
-   - the water count;
-   - the residues with alternate conformers.
+     Use them directly; you don't need to look anything up first.
+   - **What it prints:**
+     - the page size and the starting view;
+     - each map (shown or hidden, level, rms);
+     - the strongest difference features near the centre, with their nearest atoms;
+     - every plane with its fit and the features in it.
 
-   Use it instead of grepping the file.
-1. **Draft**: `moorlight-share init MODEL MAPS... -o spec.json [--title "Trypsin benzamidine"] [--description "..."] [--plane NAME=SPECS ...] --build page.html`
-   - Takes about 10 s. It writes `spec.json`, the page, and `spec.check.txt`, the full `--check` report.
-   - **Models:** `.pdb`, `.cif`, `.ent`, also gzipped. `model.pdb=name` names one (default: the file name).
-   - **Maps:** `.ccp4`, `.map` or `.mrc`, or an `.mtz` of map coefficients.
-     - An MTZ gives every map a refinement program writes for viewing: 2mFo-DFc and mFo-DFc (FWT/DELFWT,
-       2FOFCWT/FOFCWT, ...).
-     - TorchRef difference refinement (`difference_data.mtz`): the light − dark map dF on the dark phases,
-       q-weighted (`dF*W_Q,PHDELWT`; also W_InVa-weighted and unweighted), and the extrapolated light map
-       (FWT/PHWT there is 2Fext − Fc, not 2mFo-DFc). Its `*_dark-sf.mtz` gives the dark 2mFo-DFc and mFo-DFc.
-     - `file.mtz=name:F,PHI` picks two columns; `F*W` weights the amplitudes by a weight column
-       (`file.mtz=name:dF*W_Q,PHDELWT`). `file.ccp4=name` names a map.
-   - **Map kind** (`2fofc` = density in blue, `diff` = green +/red −) is taken from the MTZ columns or the file name.
-     Otherwise it is guessed from the values: a density map has almost nothing below −2.5 rms. `init` prints the
-     kinds; correct a wrong one in the spec.
-   - **Levels:** density 1.5 σ, difference 3 σ. `--level` sets the difference maps' level.
-     - Maps already in noise units: `--units absolute --unit-label SD`.
-   - **Planes:**
-     - `--plane "Benzamidine=A/1"` is the best plane through a residue's heavy atoms.
-     - `--plane "Ring=A/401 C1, A/401 N1, A/401 C2, A/401 C3"` goes through these atoms.
-     - `--plane "Zn site=A/301 ZN"` (one atom) is that atom's coordination plane.
-     - The option is repeatable.
-     - In the page every plane shows the map in use (the first visible one) at its slider level, so switching
-       maps or levels changes all planes. A plane's `map` and `level` (`init` sets the first difference map) are
-       only its start: they apply while that map is the one in use and its level has not been moved.
-     - Without `--plane`, `init` adds up to `--planes` (default 5) automatic planes:
-       - at the strongest features of the first difference map (peaks beyond `--min`, default 1.5 × its level,
-         within 1.5 Å of an atom); a residue present in several models (dark and light) gives one plane;
-       - with no difference map or no such features: through the ligands, the most buried first (a bound
-         chromophore or inhibitor before surface lipids and additives), and the coordination of metal ions.
-     - With `--planes 0` and no `--plane`, there are none; add them to the spec later.
-2. **Edit the spec** when the user asks for something else: another plane, a different centre, colour or level.
-   - When they ask for a plane ("through the azo N and the ring carbons", "perpendicular to that, through Pd1",
-     "a stack 1 Å apart"), add it to `planes`, check, build, and republish to the same artifact.
-3. **Check**: `moorlight-share spec.json --check [--at "SPEC, SPEC"] [--near SPEC --radius R [--frame "A, B, C"]]`.
-   - It prints:
-     - each map's grid and strongest peaks of each sign, each listed once next to the model with its nearest atom;
-     - for each plane:
-       - its centre and normal;
-       - its atoms' rms about their best plane, and how far the plane was moved to pass through a given `center`;
-       - a metal's coordination with distances;
-       - the atoms in the slice with their heights `h`;
-       - the peaks in the slice.
+     That is the content of your reply.
+2. **Publish** DIR/page.html with the Artifact tool: icon "molecule", a one-sentence description. For a file to
+   e-mail or attach, build with `--standalone` instead (or as well).
+3. **Reply** with what the summary says, plus the link.
+   - Don't re-check the numbers with other tools, read the moorlight source or write scripts.
+   - The printed summary and `DIR/page.check.txt` hold every number the page shows.
 
-       Three atoms always give rms 0. Use four or more to judge flatness.
-     - `--at`: values of every map at these atoms or residues (comma-separated, or repeat `--at`).
-     - `--near`: the atoms around a point, one line per residue, and every map's peaks there. With
-       `--frame "A, B, C"`, it also prints each atom's and peak's height `h` above those atoms' plane.
-   - `--map NAME` limits it to one map.
-   - `spec.check.txt` from `init` describes the spec as `init` wrote it; after edits, run `--check` again.
-   - **Read the warnings.** A map that covers only part of the cell shows its mean outside its extent.
-4. **Build**: `moorlight-share spec.json -o page.html`. It prints the size and each map's grid. An artifact page must
-   stay at or below 16 MB. Typical sizes:
+**Follow-ups:** for "add a slice…", "open on…", "show the other map", "label…", run
+`moorlight-share again DIR/page.spec.json [more options]` and republish the same file path, which keeps the link.
+- Single options given later win.
+- `--plane`, `--label` and `--distance` add to what is already there.
 
-   | Structure | Page size |
-   |---|---|
-   | Small-molecule cell | 0.4 MB per map |
-   | Protein, 2 maps | 3–5 MB |
-   | Atomic-resolution protein, 2 maps | about 8 MB |
+## Options
 
-5. **Hand it over**:
-   - Publish it as an artifact: Artifact tool with `file_path` = the page, `icon` "molecule", a one-sentence
-     `description`. The page is in the artifact form, without `<!doctype>`/`<html>`/`<head>`/`<body>`.
-   - Republishing the same file path keeps the link.
-   - Or build with `--standalone` for a file to send (e-mail, messenger, a paper's supplement or a Zenodo
-     deposit). The page fetches nothing: three.js (0.170.0, MIT) is written into it and it uses system fonts, so it
-     opens offline in any current browser with WebGL 2.
-     - Desktop and Android browsers run it from the file. On an iPhone, a file preview (Mail, WhatsApp, Files) may
-       not run it; send iPhone users a link instead (the artifact, or the file on a web server).
-     - Its "About this file" section lists the input files with SHA-256 checksums, the Moorlight version and
-       commit, the build time and the spec (file names only).
-   - A machine without a browser cannot render the page. Say so if you could not look at it.
+| Option | Effect |
+|---|---|
+| `--title`, `--description` | page name (two to four words, no "Name: explanation") and one line under it |
+| `--center SPECS` | what the page opens on, face-on (comma-separated specs). A metal gets its ligands labelled, with distances. Default: the `--plane` atoms, else the strongest difference feature, else the most buried ligand |
+| `--radius R` | Å from the centre to the screen edge at the start |
+| `--plane "NAME=SPECS; ..."` | a preset slice plane (repeatable). Three or more atoms (or a residue) give their best plane; one atom (`Zn site=ZN`) gives its coordination plane |
+| `--label SPECS`, `--distance "A, B"` | labels and distance lines at the start (repeatable) |
+| `--show MAP`, `--hide MAP` | which maps are on at the start. MAP is the name or a unique part of it. By default one density and one difference map are on |
+| `--drop MAP` | leave a map out (smaller page) |
+| `--level 4`, `--level "MAP=1.2"` | contour level: of all difference maps, or of one map |
+| `--units absolute --unit-label SD` | maps already in their own units, e.g. noise SD. Give `--level` too (e.g. 4) |
+| `--standalone` | a full HTML document to send as a file. It opens offline in any current browser |
+| `--at "SPECS"`, `--near SPEC [--near-radius R]` | also print map values at atoms, or the atoms (one line per residue) and peaks around a point |
+| `--planes N`, `--min L` | automatic planes when no `--plane` is given (default 5, at features beyond 1.5 × the level) |
 
-## What the numbers mean
+**Plane options**, after `;` in `--plane`:
 
-- **Maps are not resampled.** Each map is stored on its own grid, so values and peak heights match Coot. The page
-  keeps them to 1/100 of the map's rms.
-  - `native`: the whole unit cell, periodic. Used for small cells.
-  - `block`: the part of the grid around the models (5 Å margin). Used when that is less than half the cell, as for
-    large cells and EM boxes.
-  - `box`: tricubic resampling. Used only if a block would not fit the page: about 8 million grid points for all
-    maps together.
-  - Set `"grid"` on a map to force one; `box` also takes a `step`.
-- **Peaks** are grid points that are the extreme of their 3×3×3 neighbourhood. One finder serves every list.
-- **Values at atoms** are trilinear interpolation on the stored grid: the same number a tap on the page shows.
-- **`h`** is the signed distance from a plane (plane lists) or from the frame atoms' plane (`--near --frame`).
-- **σ** (`units: "sigma"`) is the rms of the whole map. For a light − dark map whose rms includes signal, use the
-  map's own noise units (`"units": "absolute"`) if it has them.
-- **Neighbour copies** are drawn in grey for residues within 5 Å (`neighbour_margin`) of the model, for models with a
-  crystal cell (not for EM models).
-  - They are named with their symmetry operator and lattice shift in brackets: `A/219 O [-x,y+1/2,-z+1/2 -b]`, or
-    `S/14 O [-a]` in P1. Specs accept the same text.
-  - Set `"neighbours": false` on a model to leave them out.
+| Option | Effect |
+|---|---|
+| `copies=-1,1` | parallel copies at these offsets (Å), named "NAME −1 Å" and "NAME +1 Å" |
+| `toward=SPEC` | the side the normal points to, and so where + offsets and copies go. Give an atom well off the plane, e.g. one the change moves towards |
+| `perpendicular-to=PLANE` | a plane perpendicular to PLANE (an earlier plane's name, or atoms). It contains the line through NAME's atoms and passes through `center=` |
+| `thickness=2` | a slab (Å, full width) that shows the strongest value within it |
+| `center=SPEC` | moves the plane to pass through this atom |
+| `offset=1` | moves the plane along its normal (Å) |
+| `axis=A, B` | its horizontal direction on screen |
+| `map=NAME`, `level=L` | the map and level the plane starts with |
 
-## Spec
+A coordination plane with five or more ligands goes through the four that lie flattest with the metal (its
+equatorial plane). A non-planar site, such as a tetrahedral zinc, gets a slab thick enough to take in all its
+ligands.
 
-```json
-{
-  "title": "Trypsin benzamidine",
-  "description": "PDB-REDO 3PTB: 2mFo-DFc at 1.5 σ, mFo-DFc at ±3 σ.",
-  "models": [{"path": "3ptb_final.pdb", "name": "3ptb"}],
-  "maps": [
-    {"path": "3ptb_final.mtz", "columns": "FWT,PHWT", "name": "2mFo-DFc", "kind": "2fofc", "level": 1.5},
-    {"path": "3ptb_final.mtz", "columns": "DELFWT,PHDELWT", "name": "mFo-DFc", "kind": "diff", "level": 3}
-  ],
-  "view": {"center": "A/1", "radius": 12, "labels": ["A/195 OG"]},
-  "planes": [
-    {"name": "Benzamidine", "atoms": ["A/1"], "map": "mFo-DFc", "copies": [-1, 1]},
-    {"name": "Ca site", "coordination": "A/480 CA", "map": "2mFo-DFc"},
-    {"name": "Across Ser195", "center": "A/195 OG", "normal": ["A/195 CB", "A/195 OG"], "thickness": 1}
-  ]
-}
+**Examples:**
+
+```
+moorlight-share /path/to/torchref_difference_run --title "bR 15 ms" --center "RET, A/216 NZ" \
+  --plane "Retinal=RET C5, RET C7, RET C9, RET C11, RET C13, RET C15, A/216 NZ; copies=-1,1" \
+  --plane "Across the chain=RET C7, A/216 NZ; perpendicular-to=Retinal; center=A/216 NZ; toward=RET C20" \
+  -o out/br.html
+moorlight-share 3hs4 --title "Carbonic anhydrase acetazolamide" --center ZN --plane "Zn site=ZN" \
+  --plane "Ring=AZM C1, AZM N3, AZM N2, AZM C2, AZM S2" -o out/ca2.html --standalone
+moorlight-share dark.pdb=dark E.pdb=E 2ns.ccp4="2 ns" 3p5us.ccp4="3.5 µs" --units absolute --unit-label SD \
+  --level 4 --plane "Pd1=A/1 PD" --plane "Azo=-/102 C8, -/102 N9, -/102 N10, -/102 C11; copies=-2,-1,1,2" -o out/cage.html
+moorlight-share again out/br.spec.json --plane "Asp85=A/85" --label "A/85 OD1, A/85 OD2"
 ```
 
-- **title**: the page's name, two to four words. Never a name followed by a dash or colon and an explanation; the
-  explanation goes in `description`.
-- **models**:
-  - `path` (PDB/mmCIF) and `name`;
-  - optional `color` (carbon colour, CSS);
-  - `hydrogens` (default false);
-  - `style` (`sticks` or `lines`);
-  - `visible`;
-  - `neighbours` (default true).
-- **maps**:
-  - `path`: a CCP4/MRC map, or an MTZ with `columns: "F,PHI"` (or `"F*W,PHI"`: amplitudes times a weight column).
-  - `name`: unique; planes refer to it.
-  - `kind`: `diff`, or `2fofc` (also `density`).
-  - `units`, `level`, `visible`, `color`.
-  - `grid`: `auto`, `native`, `block` or `box`; for `box`, also `step` and a top-level `region`.
-  - `units: "sigma"` (default): levels are multiples of the whole map's rms.
-  - `units: "absolute"`: levels are in the map's own units (e.g. maps already in noise SD). `unit_label` is the text
-    after the number ("SD").
-  - `sample_rate`: MTZ grid spacing d_min / rate (default 3).
-- **contour_radius**: Å around the view centre that is contoured (default 10, Coot's map radius).
-- **view** (optional; default the whole structure) — the starting view and what Reset view returns to:
-  - `center`: atom spec, residue spec, a list of specs (centroid) or `[x, y, z]`.
-  - `radius`: Å that fit the screen. `slab`: depth half-thickness.
-  - `orient`: `face` (default; the `frame` atoms' plane faces the viewer, by default the centre's atoms), `edge`,
-    or a quaternion `[x, y, z, w]`.
-  - `maps`: `{name: level}` or `false`. `labels` and `distances`: atom specs.
-- **planes** (the viewer sees them in a list and can look at, hide, copy, edit or delete them):
-  - **Placement**, one of:
-    - `atoms` (three or more, or residues) gives their best plane through their centroid;
-    - `coordination` (one atom) gives a plane through it and its ligands, centred on it:
-      - ligands are the atoms within `cutoff` Å: default 2.6, or 2.8 for Na, K, Ca, Sr and Ba;
-      - with five or more ligands (octahedral and up), the plane goes through the four that lie flattest with the
-        metal, its equatorial plane, and `--check` names the ones out of the plane;
-      - `"equatorial": false` uses all ligands;
-    - `center` + `normal` gives a plane through that point; `normal` is a vector or two atom specs (from the first to
-      the second).
+**More detail when you need it:**
+- `moorlight-share list MODEL [RESIDUE ...]` prints:
+  - chains and residue ranges;
+  - ligands;
+  - metals with their ligand atoms and distances;
+  - waters;
+  - alternate conformers.
 
-    `center` may also be given with `atoms` to move the plane's centre.
-  - `axis`: two atom specs that set the plane's horizontal direction.
-  - `toward`: an atom spec (or point) on the side the normal should point to. A best plane's normal otherwise
-    points to an arbitrary side; `offset` and `copies` count along the normal, and `--check` prints it.
-  - `offset`: Å along the normal.
-  - `copies`: extra parallel planes at these offsets from it (Å, e.g. `[-1, 1]`), named "<name> +1 Å".
-  - `thickness`: Å. A thick slice shows the strongest value within it, with its sign kept.
-  - `radius`: half the square's side (default `contour_radius`).
-  - `map`: the map the plane was made for (default the first visible). The page shows the map in use instead
-    when the viewer switches maps.
-  - `level`: start level for this plane on its `map`. Choosing the plane in the list sets the map to it; any
-    slider or scroll change on that map then moves all its planes.
-  - `color`: outline colour, CSS hex. `visible`: default true.
+  With residues (`RET`, `A/94`), it prints their atom names instead.
+- `DIR/page.check.txt` holds every number the page shows: all peaks with ranks, each plane's atoms with heights, and values at labels.
+- **No browser:** a machine without a browser cannot render the page. Say so if you could not look at it.
 
-**Atom specs**:
-- `A/85 CA`, `A/85 LYS CA`, `2#A/85 SG` (model 2), `A/85` (residue: its heavy atoms), `A/52A` (insertion code).
-- **Alternate conformers:** a spec without an altloc takes the first conformer (A); add `:B` for another
-  (`A/85 CA:B`). `--at` lists every conformer.
-- **Neighbour copies:** add the copy's tag in brackets, as `--check` prints it.
-- Chain names are as in the file (`-` is a valid chain).
-- An unknown atom gives an error that lists the atoms of that residue; an unknown residue lists the residues.
+## Maps
+
+- **MTZ files:** an MTZ gives the maps a refinement program writes for viewing (2mFo-DFc and mFo-DFc: FWT/DELFWT,
+  2FOFCWT/FOFCWT, ...).
+  - `file.mtz=name:F,PHI` picks columns.
+  - `F*W,PHI` weights the amplitudes by a weight column.
+- **TorchRef `difference_data.mtz`:**
+  - It gives light − dark dF on the dark phases, q-weighted by default (`dF*W_Q,PHDELWT`).
+  - Its FWT/PHWT is the extrapolated light map, 2Fext − Fc, not a 2mFo-DFc.
+  - Levels are in σ, the rms of the whole map, signal included, so a TorchRef light − dark map has no separate noise scale here.
+- **Map kind:** `diff` maps are green (+) and red (−); `2fofc` maps are blue. The kind comes from the MTZ columns or the file name, or failing that from the values: a density map has almost nothing below −2.5 rms.
+- **Default levels:** 1.5 σ for density maps, ±3 σ for difference maps.
+- **Grid:** each map is stored on its own grid, so values and peak heights match Coot.
+  - Small cells are stored whole and periodic.
+  - Large cells and EM boxes are stored as a block around the model with a 5 Å margin.
+  - Only if neither fits is the map resampled.
+  - Pages are about 0.4 MB per map for small cells and 2–5 MB for two protein maps. Artifact pages must stay at or below 16 MB, and e-mail is safest below about 7 MB.
+- **Values at atoms** are trilinear interpolation on the stored grid: the same number a tap on the page shows.
+- **Peaks** are grid points that are the extreme of their 3×3×3 neighbourhood.
+- **Neighbour copies:** neighbour-cell and symmetry copies within 5 Å of the model are drawn in grey and named with their operator, e.g. `A/219 O [-x,y+1/2,-z+1/2 -b]` or `S/14 O [-a]`. Specs accept the same text.
 
 ## The page
 
-- **Maps:** visibility and a log-scale level slider for each map. Under each map: its rms and the level on the
-  map's own scale (σ maps: in map units; absolute maps: as a multiple of the rms). `--check` prints the same.
-- **Maps drawn as:** Mesh or Slice. Switching or changing maps never changes this mode. Slice mode shows slices
-  only (no contours), of the map in use (the first visible); with every map off the planes are shown empty. In
-  slice mode:
-  - the live plane (yellow outline) faces the viewer and turns with the molecule until it is fixed;
-  - sliders for depth, thickness and two tilts;
-  - buttons: Fix plane, Through labelled atoms (best plane through three or more tapped atoms), Face me, and
-    Save plane (S).
-- **Planes:** the preset planes and the viewer's own saved ones, each with its outline colour. They are drawn only
-  in slice mode, with the map in use at its level.
-  - Tap a name to look at that plane, centred and face-on.
-  - The checkbox hides it.
-  - Copy adds a parallel plane at the copy offset (slider, −5 to +5 Å).
-  - Edit makes it the live plane; × removes it.
-  - The viewer's own planes and copies are kept in their browser. Presets come with the page.
-- **Structure:** a checkbox for each model and for the neighbouring cells, plus hydrogens, Hide in front (residues
-  in front of the centre residue that cover it are hidden with their density; on by default, key C), clear labels
-  and Reset view.
-- **Depth bar** (right edge of the view): the structure from front (top) to back.
-  - Its window is the layer you see. Drag it to look deeper; drag its ends to make the layer thinner or thicker;
-    tap the bar to jump.
-  - The rotation centre (white dot) never moves with it. Double-tap an atom to make that atom the centre.
-  - The live slice rides in the middle of the window (yellow tick). Keys: `,` `.` move, `[` `]` change the
-    thickness.
-- **Zoom** only magnifies: the camera is orthographic and never enters the structure.
-- **Full screen** (button or F): level and depth sliders, Fix plane, Save, and an Atoms toggle (A).
-- **Theme:** one deliberate dark look (Coot black).
-- **Layout:** on an upright phone the panel sits under the view, otherwise beside it.
+- **Maps:** each map has an on/off switch and a log-scale level slider, with its rms and the level on its own scale.
+  - Two-finger scroll, or the mouse wheel, sets the level of the map in use: the first one switched on.
+- **Mesh or Slice:** maps are drawn as Mesh or as Slice, and changing maps never changes the mode.
+  - Slice mode draws only slices: the live plane through the centre, and the preset and saved planes.
+  - Every slice shows the map in use at its slider level. With every map off, the planes are drawn empty.
+  - Tapping a plane's name looks at it face-on.
+  - The viewer can tilt, thicken, fix, save and copy planes.
+- **Structure:**
+  - each model and the neighbour cells can be switched on or off;
+  - a hydrogens switch;
+  - Hide in front (on by default) hides residues in front of the centre residue, together with their density;
+  - clear labels and Reset view.
+- **Controls:**
+
+  | Input | Action |
+  |---|---|
+  | drag | rotate |
+  | two-finger click-drag (right-drag) | pan |
+  | pinch / Ctrl+scroll | zoom |
+  | tap an atom | label and map values |
+  | double-tap an atom | centre on it |
+
+  The depth bar on the right moves the visible layer. Full screen is F; landscape puts the panel beside the view.
+- **Self-contained:** the page fetches nothing. three.js 0.170.0 (MIT) is written into it, and it uses system fonts.
+  - Desktop and Android browsers open the file.
+  - An iPhone's file preview may not run it, so send iPhone users the link.
+  - "About this file" lists the input files with SHA-256 checksums, the Moorlight version and commit, and the build time.
+
+## Spec files (rarely needed)
+
+`DIR/page.spec.json` records the page: the files, maps, view, planes and the command line that made it. The other commands that work on it:
+- `moorlight-share again` re-runs that command line.
+- `moorlight-share SPEC.json [-o page.html] [--check [--at ...] [--near ...]]` builds or checks a spec directly.
+- `moorlight-share init FILES -o spec.json` drafts one.
+
+Prefer options and `again` to editing a spec.

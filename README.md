@@ -106,14 +106,16 @@ any current browser with WebGL 2 (on an iPhone, open a link rather than a file p
 lists the input files with SHA-256 checksums, the Moorlight version and commit, and the build time.
 
 ```
-moorlight-share init model.pdb maps.mtz -o spec.json --plane "Ligand=A/401" --build page.html
-moorlight-share spec.json --check          # peaks, planes and values at atoms, as the page shows them
-moorlight-share spec.json -o page.html --standalone
+moorlight-share model.pdb maps.mtz --title "Ligand site" --center A/401 --plane "Ring=A/401 C1, A/401 C2, A/401 C3" -o page.html
+moorlight-share /path/to/refinement_folder --title "Dark vs light" --center RET -o page.html   # TorchRef layouts
+moorlight-share 3hs4 --center ZN --plane "Zn site=ZN" -o page.html --standalone            # PDB-REDO entry
+moorlight-share again page.spec.json --plane "Second=A/85; copies=-1,1"                     # same page, more
 ```
 
-`init` reads models (PDB/mmCIF) and maps. An MTZ gives its 2mFo-DFc and mFo-DFc maps; CCP4/MRC maps (also EM
-boxes) are read as they are. The bundled `moorlight-share` skill, installed with `moorlight --install-skill`, has the
-spec format and the agent workflow.
+One command builds the page in a few seconds and prints what it shows (maps, the strongest difference features
+near the centre, each plane with the features in it). Atom specs also take residue names (`RET`, `ZN C1`). Plane
+options: `copies`, `toward`, `perpendicular-to`, `thickness`, `center`, `offset`, `axis`. The bundled
+`moorlight-share` skill, installed with `moorlight --install-skill`, has the agent workflow.
 
 ## Notes / limits (v0.1)
 

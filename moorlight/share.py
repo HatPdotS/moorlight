@@ -143,11 +143,11 @@ class Neighbours:
         Minv = np.array(cell.frac.mat.tolist())
         heavy = np.array([e != "H" for e in mol.elements])
         F = mol.xyz @ Minv.T
-        groups = {}
-        for i, inf in enumerate(mol.info):
-            if heavy[i]:
-                groups.setdefault(inf[:4], []).append(i)
-        groups = [np.array(g) for g in groups.values()]
+        heavy_idx = np.flatnonzero(heavy)
+        keys = {}
+        res = np.array([keys.setdefault(mol.info[i][:4], len(keys)) for i in heavy_idx])
+        order = np.argsort(res, kind="stable")
+        groups = np.split(heavy_idx[order], np.flatnonzero(np.diff(res[order])) + 1)
         tree = cKDTree(mol.xyz[heavy])
         lo, hi = mol.xyz[heavy].min(0) - margin, mol.xyz[heavy].max(0) + margin
         corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])]) @ Minv.T
@@ -163,12 +163,18 @@ class Neighbours:
                 if ident and not any(t):
                     continue
                 X = (Fo + np.array(t)) @ M.T
+                Xh = X[heavy_idx]
+                if (Xh.max(0) < lo).any() or (Xh.min(0) > hi).any():
+                    continue
+                close = np.isfinite(tree.query(Xh, distance_upper_bound=margin)[0])
+                if not close.any():
+                    continue
                 tag = (("" if ident else op.triplet() + " ") + _shift_tag(t)).strip()
-                for g in groups:
-                    if np.isfinite(tree.query(X[g], distance_upper_bound=margin)[0]).any():
-                        self.orig.extend(g.tolist())
-                        self.tags.extend([tag] * len(g))
-                        xyz.append(X[g])
+                for r in np.unique(res[close]):
+                    g = groups[r]
+                    self.orig.extend(g.tolist())
+                    self.tags.extend([tag] * len(g))
+                    xyz.append(X[g])
         self.xyz = np.concatenate(xyz) if xyz else np.zeros((0, 3))
         self.index = {(o, t): k for k, (o, t) in enumerate(zip(self.orig, self.tags))}
         # bonds of the model between atoms of the same copy
@@ -209,6 +215,43 @@ class Atoms:
         self.nb = neighbours              # model number -> Neighbours (or absent)
         self.nb_number = {k: len(mols) + j + 1 for j, k in enumerate(sorted(neighbours))}
 
+    def family(self, number):
+        """Page molecule numbers of one model: the model and its neighbour copies."""
+        if number <= len(self.mols):
+            return {number, self.nb_number.get(number)} - {None}
+        return {number} | {k for k, n in self.nb_number.items() if n == number}
+
+    def by_name(self, spec):
+        """'RET', 'ZN', 'AZM C1', '2#RET C13:B' -> the spec of that residue (or atom). With several residues of the
+        name, the most buried one: the largest fraction of its atoms within 4 A of the model's polymer."""
+        m_ = re.match(r"^(?:(\d+)\s*#\s*)?([A-Za-z0-9]{1,3})(?:\s+(\S+))?$", str(spec).strip())
+        if not m_:
+            raise ValueError(f"cannot read atom spec {spec!r}; use e.g. 'A/85 CA', 'A/85 LYS CA:B', '2#A/85 SG' or a "
+                             "residue name such as 'RET' or 'ZN C1'")
+        k, name, atom = int(m_.group(1) or 1), m_.group(2).upper(), m_.group(3)
+        if not 1 <= k <= len(self.mols):
+            raise ValueError(f"atom spec {spec!r}: no model {k} (there are {len(self.mols)})")
+        m = self.mols[k - 1]
+        found = {}
+        for i, inf in enumerate(m.info):
+            if inf[3].upper() == name and m.elements[i] != "H":
+                found.setdefault(tuple(inf[:3]), []).append(i)
+        if not found:
+            names = sorted({inf[3] for inf in m.info if gemmi.find_tabulated_residue(inf[3]) is None
+                            or not gemmi.find_tabulated_residue(inf[3]).is_amino_acid()})
+            raise ValueError(f"atom spec {spec!r}: no residue named {name} in {m.name}; other residue names: "
+                             + " ".join(names[:30]))
+        key = next(iter(found))
+        if len(found) > 1:
+            poly = [i for i, inf in enumerate(m.info) if m.elements[i] != "H"
+                    and (t := gemmi.find_tabulated_residue(inf[3])) is not None
+                    and (t.is_amino_acid() or t.is_nucleic_acid())]
+            if poly:
+                tree = cKDTree(m.xyz[poly])
+                key = max(found, key=lambda r: float(np.mean(tree.query(m.xyz[found[r]])[0] <= 4.0)))
+        out = f"{k}#{key[0]}/{key[1]}{key[2]}"
+        return out + (f" {atom}" if atom else "")
+
     def resolve(self, spec, first_conformer=True):
         """Atom spec -> (page molecule number, [atom indices], xyz array). A residue spec gives its heavy atoms."""
         tag = None
@@ -216,7 +259,12 @@ class Atoms:
             m_ = _TAGGED.match(spec)
             if m_:
                 spec, tag = m_.group(1), m_.group(2).strip()
-        d = parse_atom_spec(spec)
+        try:
+            d = parse_atom_spec(spec)
+        except ValueError:
+            if not isinstance(spec, str):
+                raise
+            d = parse_atom_spec(self.by_name(spec))
         k = d["mol"] or 1
         if not 1 <= k <= len(self.mols):
             raise ValueError(f"atom spec {spec!r}: no model {k} (there are {len(self.mols)})")
@@ -370,8 +418,14 @@ class PageMap:
     block: the part of that grid that covers the models and a margin, nothing resampled.
     box: resampled on an orthogonal box (when even the block is too large for the page)."""
 
-    def __init__(self, spec, base, box_lo, box_hi, budget=POINT_BUDGET):
-        grid, kind = read_map(spec, base)
+    def __init__(self, spec, base, box_lo, box_hi, budget=POINT_BUDGET, cache=None):
+        key = ("map", os.path.abspath(_path(spec["path"], base)), spec.get("columns"), spec.get("sample_rate"))
+        if cache is None or key not in cache:
+            got = read_map(spec, base)
+            if cache is None:
+                cache = {}
+            cache[key] = got
+        grid, kind = cache[key]
         whole = np.array(grid, copy=False)
         self.name = spec.get("name") or os.path.basename(spec["path"])
         finite = np.isfinite(whole)
@@ -502,7 +556,7 @@ class PageMap:
         scale = self.scale
         q = np.ascontiguousarray(np.round(self.arr / scale).astype("<i2")).ravel().view(np.uint8).reshape(-1, 2)
         # high bytes first, then low bytes: the high bytes are mostly alike and compress ~15 % better apart
-        data = base64.b64encode(gzip.compress(q[:, 1].tobytes() + q[:, 0].tobytes(), compresslevel=9, mtime=0)).decode()
+        data = base64.b64encode(gzip.compress(q[:, 1].tobytes() + q[:, 0].tobytes(), compresslevel=6, mtime=0)).decode()
         return {"name": self.name, "kind": self.kind, "units": self.units, "unit_label": self.unit_label,
                 "level": self.level, "visible": self.visible, "color": self.color, "mean": self.mean, "rms": self.rms,
                 "grid": self.mode, "n": [int(v) for v in self.n], "origin": [round(float(v), 4) for v in self.origin],
@@ -552,11 +606,17 @@ def _rot_from_quat(q):
 
 # ------------------------------------------------------------------ build
 class Share:
-    def __init__(self, spec, base):
+    def __init__(self, spec, base, cache=None):
+        """cache: a dict shared between Share objects of one run, so models, neighbours and maps are read once."""
         self.spec, self.base = spec, base
+        cache = {} if cache is None else cache
         self.mols = []
-        for ms in spec.get("models") or []:
-            m = Molecule(_path(ms["path"], base), name=ms.get("name"))
+        for k, ms in enumerate(spec.get("models") or []):
+            key = ("model", k, os.path.abspath(_path(ms["path"], base)))
+            if key not in cache:
+                cache[key] = Molecule(_path(ms["path"], base), name=ms.get("name"))
+            m = cache[key]
+            m.name = ms.get("name") or os.path.basename(ms["path"])
             m.color, m.hydrogens = ms.get("color"), ms.get("hydrogens", False)
             m.style = ms.get("style")
             m.visible = ms.get("visible", True)
@@ -569,12 +629,15 @@ class Share:
         neighbours = {}
         for k, m in enumerate(self.mols, 1):
             if m.neighbours and m.st.cell.is_crystal():
-                nb = Neighbours(m, margin)
+                key = ("neighbours", k, id(m), margin)
+                if key not in cache:
+                    cache[key] = Neighbours(m, margin)
+                nb = cache[key]
                 if len(nb.orig):
                     neighbours[k] = nb
         self.atoms = Atoms(self.mols, neighbours)
         map_specs = spec.get("maps") or []
-        self.maps = [PageMap(s, base, lo, hi, POINT_BUDGET / max(1, len(map_specs))) for s in map_specs]
+        self.maps = [PageMap(s, base, lo, hi, POINT_BUDGET / max(1, len(map_specs)), cache) for s in map_specs]
         names = [x.name for x in self.maps]
         if len(set(names)) != len(names):
             raise ValueError(f"map names must be unique: {names}")
@@ -587,7 +650,8 @@ class Share:
             self.planes.append(self.plane(p, k))
             base = self.planes[-1]["name"]
             for o in p.get("copies") or []:      # parallel copies at these offsets (Å) along the normal
-                name = f"{base} {o:+g} \u00c5"
+                sign = "+" if o > 0 else "\u2212"
+                name = f"{base} {sign}{abs(o):g} \u00c5"
                 self.planes.append(self.plane({**p, "name": name, "offset": float(p.get("offset", 0)) + float(o),
                                                "color": None}, k))
 
@@ -607,7 +671,7 @@ class Share:
         return Atoms(self.mols, {}).point(spec)
 
     def stop(self, s, k):
-        where = f"stop {k + 1} ({s.get('name', '')!r})"
+        where = "view" if k == 0 and not s.get("name") else f"stop {k + 1} ({s.get('name', '')!r})"
         try:
             center = self.atoms.point(s["center"])
             frame = s.get("frame")
@@ -622,7 +686,9 @@ class Share:
                 pts = self.atoms.xyz(frame)
                 if len(pts) < 3 and s.get("frame") is None and len(pts) == 1:
                     # a lone atom (a metal): use it and the atoms within 2.6 A, its coordination
-                    near_pts = [xyz for _, _, xyz in self._drawn() if 0.1 < np.linalg.norm(xyz - pts[0]) <= 2.6]
+                    fam = self.atoms.family(self.atoms.resolve(frame[0])[0])
+                    near_pts = [xyz for nb, _, xyz in self._drawn()
+                                if nb in fam and 0.1 < np.linalg.norm(xyz - pts[0]) <= 2.6]
                     if len(near_pts) >= 2:
                         pts = np.vstack([pts] + near_pts)
                 if len(pts) >= 3:
@@ -647,7 +713,7 @@ class Share:
         except (ValueError, KeyError) as e:
             raise ValueError(f"{where}: {e}") from None
         radius = float(s.get("radius", 8.0))
-        out = {"name": s.get("name") or f"stop {k + 1}", "text": s.get("text", ""),
+        out = {"name": s.get("name") or ("start" if k == 0 else f"stop {k + 1}"), "text": s.get("text", ""),
                "center": [round(float(v), 3) for v in center], "orient": orient, "radius": radius,
                "slab": float(s.get("slab", radius)), "maps": maps, "labels": labels, "distances": dists,
                "_center_spec": s["center"], "_plane": plane}
@@ -665,6 +731,19 @@ class Share:
             for i in range(len(nb.orig)):
                 yield self.atoms.nb_number[k], i, nb.xyz[i]
 
+    def ligands_of(self, spec):
+        """[(atom spec, distance)] of the atoms coordinating a lone metal or ion atom (its own model), nearest first;
+        [] for other atoms."""
+        number, idx, xyz = self.atoms.resolve(spec)
+        el = self._element(number, idx[0]) if len(idx) == 1 else "C"
+        if el.upper() in ("C", "N", "O", "S", "P", "H", "SE", "CL", "BR", "I", "F"):
+            return []
+        cut = coordination_cutoff(el)
+        fam = self.atoms.family(number)
+        out = [(self.atoms.name(nb, i), float(np.linalg.norm(x - xyz[0]))) for nb, i, x in self._drawn()
+               if nb in fam and 0.1 < np.linalg.norm(x - xyz[0]) <= cut]
+        return sorted(out, key=lambda t: t[1])
+
     def plane(self, p, k):
         """Preset slice plane: the best plane through `atoms` (three or more), through an atom and the atoms within
         `cutoff` of it (`coordination`: a metal's coordination plane), or `center` with a `normal` (a vector, or two
@@ -679,8 +758,9 @@ class Share:
                 if len(idx) != 1:
                     raise ValueError("\"coordination\" is one atom, e.g. \"A/301 ZN\"")
                 cut = float(p.get("cutoff") or coordination_cutoff(self._element(number, idx[0])))
+                fam = self.atoms.family(number)          # another model's copy of the site is not a ligand
                 ligands = [(nb, i, float(np.linalg.norm(x - xyz[0]))) for nb, i, x in self._drawn()
-                           if 0.1 < np.linalg.norm(x - xyz[0]) <= cut]
+                           if nb in fam and 0.1 < np.linalg.norm(x - xyz[0]) <= cut]
                 if len(ligands) < 2:
                     raise ValueError(f"fewer than two atoms within {cut:g} A of {p['coordination']}; raise \"cutoff\"")
                 ligands.sort(key=lambda t: t[2])
@@ -691,12 +771,44 @@ class Share:
                     use = list(min(itertools.combinations(use, 4), key=lambda q: _plane_rms(np.vstack([xyz, lx[list(q)]]))))
                 pts = np.vstack([xyz, lx[use]])
                 centre = xyz[0]
+                lig_atoms = [ligands[j] for j in use]
                 ligands = [(self.atoms.name(nb, i), d, j in use) for j, (nb, i, d) in enumerate(ligands)]
+            elif p.get("perpendicular_to") is not None:
+                # perpendicular to another plane (an earlier plane's name, or atoms), containing the line of `atoms`
+                ref = p["perpendicular_to"]
+                prev = next((q for q in self.planes if q["name"] == ref), None) if isinstance(ref, str) else None
+                if prev is not None:
+                    n_ref = np.array(prev["n"])
+                else:
+                    try:
+                        rp = self.atoms.xyz(ref if isinstance(ref, list) else [t.strip() for t in str(ref).split(",")])
+                    except ValueError:
+                        raise ValueError(f"\"perpendicular_to\": {ref!r} is neither an earlier plane "
+                                         f"({[q['name'] for q in self.planes]}) nor atoms") from None
+                    if len(rp) < 3:
+                        raise ValueError("\"perpendicular_to\" needs an earlier plane's name or three or more atoms")
+                    n_ref = screen_axes(rp, "face")[2]
+                line = self.atoms.xyz(p.get("atoms") or [])
+                if len(line) < 2:
+                    raise ValueError("a perpendicular plane needs \"atoms\": two or more along the line it contains")
+                c0 = line - line.mean(0)
+                dvec = np.linalg.eigh(c0.T @ c0)[1][:, 2] if len(line) > 2 else line[1] - line[0]
+                dvec = dvec - n_ref * (dvec @ n_ref)
+                if np.linalg.norm(dvec) < 1e-6:
+                    raise ValueError("the atoms' line is along the other plane's normal; no plane is perpendicular "
+                                     "to it and contains them")
+                ex = dvec / np.linalg.norm(dvec)
+                n = np.cross(n_ref, ex)
+                n /= np.linalg.norm(n)
+                ey = np.cross(n, ex)
+                centre = self.atoms.point(p["center"]) if "center" in p else line.mean(0)
+                h = (line - centre) @ n
+                rms, shift = float(np.sqrt(np.mean(h ** 2))), 0.0
             elif p.get("atoms"):
                 pts = self.atoms.xyz(p["atoms"])
                 if len(pts) < 3:
                     raise ValueError("\"atoms\" needs three or more atoms (one atom: use \"coordination\")")
-            if pts is not None:
+            if pts is not None and p.get("perpendicular_to") is None:
                 ex, ey, n = screen_axes(pts, "face")
                 if "center" in p:
                     centre = self.atoms.point(p["center"])
@@ -704,6 +816,8 @@ class Share:
                     centre = pts.mean(0)
                 rms = _plane_rms(pts)
                 shift = float((centre - pts.mean(0)) @ n)
+            elif p.get("perpendicular_to") is not None:
+                pass
             elif "center" in p and "normal" in p:
                 centre = self.atoms.point(p["center"])
                 nv = p["normal"]
@@ -735,6 +849,12 @@ class Share:
                 raise ValueError(f"no map named {name!r}; maps: {[x.name for x in self.maps]}")
         except (ValueError, KeyError) as e:
             raise ValueError(f"{where}: {e}") from None
+        thick = float(p.get("thickness", 0.0))
+        if ligands and "thickness" not in p:
+            # tetrahedral and other non-planar sites: a slice thick enough to take in every ligand used
+            h = np.abs((np.array([self._atom_xyz(nb, i) for nb, i, _ in lig_atoms]) - centre) @ n)
+            if h.max() > 0.5:
+                thick = float(min(4.0, np.ceil((2 * h.max() + 0.3) * 10) / 10))
         p0 = centre + n * float(p.get("offset", 0.0))
         color = p.get("color")
         if isinstance(color, str):
@@ -742,7 +862,7 @@ class Share:
         r3 = lambda v: [round(float(t), 4) for t in v]
         return {"name": p.get("name") or f"Preset {k + 1}", "p0": r3(p0), "ex": r3(ex), "ey": r3(ey), "n": r3(n),
                 "r": float(p.get("radius", self.spec.get("contour_radius", 10.0))),
-                "thick": float(p.get("thickness", 0.0)), "map": name, "level": p.get("level"), "color": color,
+                "thick": thick, "map": name, "level": p.get("level"), "color": color,
                 "visible": bool(p.get("visible", True)), "_rms": rms, "_ligands": ligands, "_shift": shift}
 
     def payload(self):
@@ -804,6 +924,82 @@ class Share:
         return page
 
     # ------------------------------------------------------------- check
+    def slice_peaks(self, pl, x, level=None):
+        """[(xyz, value, h)] of map x's peaks (both signs for a difference map) within a plane's slice, strongest
+        first; level defaults to the plane's level on its own map, else the map's level."""
+        p0, n = np.array(pl["p0"]), np.array(pl["n"])
+        ex, ey = np.array(pl["ex"]), np.array(pl["ey"])
+        half = max(pl["thick"] / 2, 0.5)
+        if level is None:
+            level = float(pl["level"]) if pl["level"] is not None and pl["map"] == x.name else x.level
+        found = []
+        for neg in ((False, True) if x.kind == "diff" else (False,)):
+            for xyz, v in x.peaks(level, negative=neg):
+                q = x.image_near(xyz, p0)
+                d = q - p0
+                if abs(d @ n) <= half and abs(d @ ex) <= pl["r"] and abs(d @ ey) <= pl["r"]:
+                    found.append((q, v, float(d @ n)))
+        found.sort(key=lambda t: -abs(t[1]))
+        return found
+
+    def summary(self, page=None, size=None):
+        """A few lines that say what the page shows, with numbers, for the reply that goes with it."""
+        out = []
+        p = out.append
+        near = self.atoms.nearest()
+        diff = next((x for x in self.maps if x.kind == "diff" and x.visible), None) or \
+            next((x for x in self.maps if x.kind == "diff"), None)
+        if page:
+            p(f"{page}: {size / 1e6:.1f} MB, title {self.spec.get('title')!r}")
+        v = self.view
+        if v:
+            c = v["_center_spec"]
+            c = ", ".join(c) if isinstance(c, list) and not _is_xyz(c) else (c if isinstance(c, str) else "a point")
+            p(f"opens on {c}, {2 * v['radius']:g} A across the screen" + (", face-on" if v["_plane"] else ""))
+            if v["labels"]:
+                p("  labels: " + ", ".join(self.atoms.name(nb, i) for nb, i in v["labels"]))
+        for x in self.maps:
+            u = x.unit_label or x.units
+            p(f"map {x.name!r} [{'difference' if x.kind == 'diff' else 'density'}]: "
+              f"{'shown' if x.visible else 'hidden'} at {'±' if x.kind == 'diff' else ''}{x.level:g} {u}"
+              + (f"; rms {x.rms:.3g}" if x.units == "sigma" else f"; its rms is {x.rms:.3g} {u}"))
+        if diff is not None and v:
+            c = np.array(v["center"])
+            r = max(6.0, min(v["radius"], 10.0))
+            found = []
+            for neg in (False, True):
+                for xyz, val in diff.peaks(diff.level, negative=neg):
+                    q = diff.image_near(xyz, c)
+                    if np.linalg.norm(q - c) <= r:
+                        found.append((abs(val), val, q))
+            found.sort(key=lambda t: -t[0])
+            u = diff.unit_label or diff.units
+            p(f"strongest {diff.name!r} features within {r:g} A of the centre: "
+              + ("; ".join(f"{val:+.1f} {u} {near(q)[1]:.1f} A from {near(q)[0]}" for _, val, q in found[:6])
+                 or "none beyond the level"))
+        if self.planes:
+            p(f"planes (drawn in Slice mode; each shows the map in use):")
+        for pl in self.planes:
+            line = f"  {pl['name']}"
+            if pl["_rms"] is not None:
+                line += f": atoms {pl['_rms']:.2f} A rms off the plane"
+            if pl["thick"]:
+                line += f", {pl['thick']:g} A thick"
+            if pl["_ligands"]:
+                used = [f"{nm} {d:.2f}" for nm, d, u_ in pl["_ligands"] if u_]
+                line += "; ligands " + ", ".join(used)
+            x = next((m for m in self.maps if m.name == pl["map"]), None) or diff
+            if x is not None and x.kind == "diff":
+                pk = self.slice_peaks(pl, x)
+                c = np.array(pl["p0"])
+                pk = [t for t in pk if np.linalg.norm(t[0] - c) <= 6.0][:3]
+                u = x.unit_label or x.units
+                if pk:
+                    line += "; in the slice near its centre: " + ", ".join(
+                        f"{val:+.1f} {u} at {near(q)[0]}" for q, val, _ in pk)
+            p(line)
+        return "\n".join(out)
+
     def _peak_lines(self, x, center, radius, level, near, plane=None, limit=8):
         """Peaks of one map within radius of center (their images next to it), as text lines."""
         u = x.unit_label or x.units
@@ -824,11 +1020,14 @@ class Share:
                 lines.append(f"      {v:+7.2f} {u} at ({p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f})  {d:.2f} A from {nm}{h}")
         return lines
 
-    def report(self, at=(), near_specs=(), near_radius=5.0, n_peaks=12, stop_peaks=8, maps_only=(), frame=None):
+    def report(self, at=(), near_specs=(), near_radius=5.0, n_peaks=12, stop_peaks=8, maps_only=(), frame=None,
+               full=None):
         """What the page shows, in numbers. maps_only: names of the maps to list (default all); frame: atom specs whose
-        plane gives h for the --near lists."""
+        plane gives h for the --near lists. With at or near_specs, only those sections unless full."""
         out = []
         p = out.append
+        if full is None:
+            full = not (at or near_specs)
         near = self.atoms.nearest()
         to_model = self.atoms.near_model()
         p("Peaks are grid points that are the extreme of their 3x3x3 neighbourhood; one finder serves every list. "
@@ -933,6 +1132,8 @@ class Share:
                       f"{'-' if neg else '+'}{lv:g} {u} in the slice" + (", strongest: " + "; ".join(
                           f"{v:+.1f} {near(q)[1]:.2f} A from {near(q)[0]} (h {h:+.2f})" for q, v, h in found[:stop_peaks])
                           if found else ""))
+        if not full:
+            del out[:]
         fplane = None
         if frame:
             pts = self.atoms.xyz(frame)
@@ -1113,23 +1314,63 @@ def _ligand_planes(sh, n):
     return ([p for _, p in sorted(ligands, key=lambda t: (-t[0][0], -t[0][1]))] + ions)[:n]
 
 
+PLANE_OPTIONS = ("copies", "toward", "thickness", "offset", "axis", "center", "normal", "radius", "map", "level",
+                 "perpendicular-to", "cutoff", "equatorial", "color")
+
+
 def _requested_plane(sh, text):
-    """'NAME=SPEC, SPEC, ...' -> a plane: one atom gives its coordination plane, more give their best plane."""
-    name, _, specs = text.partition("=") if "=" in text else ("", "", text)
+    """'NAME=SPEC, SPEC, ...[; option=value ...]' -> a plane. One atom gives its coordination plane, more give their
+    best plane; with perpendicular-to=PLANE the atoms give a line that the plane contains, perpendicular to PLANE (an
+    earlier plane's name, or atoms). Options: see PLANE_OPTIONS (copies=-1,1; toward=SPEC; thickness=2; ...)."""
+    head, *opts = [t.strip() for t in text.split(";")]
+    name, _, specs = head.partition("=") if "=" in head else ("", "", head)
     items = [t.strip() for t in specs.split(",") if t.strip()]
     if not items:
         raise ValueError(f"--plane {text!r}: give NAME=SPEC, SPEC, ... (atom or residue specs)")
+    d = {"name": name.strip() or ", ".join(items)}
+    extra = {}
+    for o in opts:
+        if not o:
+            continue
+        key, eq, val = o.partition("=")
+        key, val = key.strip().lower(), val.strip().replace("\u00c5", "").replace("\u2212", "-").strip()
+        if not eq or key not in PLANE_OPTIONS:
+            raise ValueError(f"--plane {text!r}: cannot read {o!r}; options: " + ", ".join(f"{k}=..." for k in PLANE_OPTIONS))
+        try:
+            if key == "copies":
+                extra[key] = [float(t) for t in val.split(",") if t.strip()]
+            elif key in ("thickness", "offset", "radius", "level", "cutoff"):
+                extra[key] = float(val)
+            elif key == "equatorial":
+                extra[key] = val.lower() in ("1", "true", "yes", "on")
+            elif key in ("axis", "normal"):
+                parts = [t.strip() for t in val.split(",") if t.strip()]
+                extra[key] = [float(t) for t in parts] if key == "normal" and len(parts) == 3 and all(
+                    re.fullmatch(r"[-+]?[\d.]+(e[-+]?\d+)?", t) for t in parts) else parts
+            else:
+                extra[key.replace("-", "_")] = val
+        except ValueError:
+            raise ValueError(f"--plane {text!r}: bad value in {o!r}") from None
     try:
-        count = sum(len(sh.atoms.resolve(t)[1]) for t in items)
+        if "perpendicular_to" in extra:
+            sh.atoms.xyz(items)
+            d["atoms"] = items
+        else:
+            count = sum(len(sh.atoms.resolve(t)[1]) for t in items)
+            d.update({"coordination": items[0]} if count == 1 else {"atoms": items})
     except ValueError as e:
         raise ValueError(f"--plane {text!r}: {e}") from None
-    d = {"name": name.strip() or ", ".join(items)}
-    d.update({"coordination": items[0]} if count == 1 else {"atoms": items})
+    d.update(extra)
     return d
 
 
+def _is_primary_density(name):
+    """Density maps worth showing first: not extrapolated, Fc or Fmodel maps."""
+    return not re.search(r"(?i)extrapolated|\bfc\b|fmodel|\bfc \(", name)
+
+
 def init_spec(models, maps, title=None, units="sigma", unit_label=None, level=None, min_peak=None, n_planes=None,
-              planes=(), base=".", description=""):
+              planes=(), base=".", description="", center=None, radius=None, drop=(), cache=None):
     """A ready-to-build spec from files: a starting view of the whole structure and preset slice planes.
 
     Planes: the requested ones ('NAME=SPEC, SPEC, ...'), then up to n_planes automatic ones (default 5, or 0 when
@@ -1151,15 +1392,19 @@ def init_spec(models, maps, title=None, units="sigma", unit_label=None, level=No
         e["units"] = units
         if unit_label:
             e["unit_label"] = unit_label
+    for d in drop:
+        gone = _match_map([e["name"] for e in entries], d)
+        entries = [e for e in entries if e["name"] != gone]
     spec["maps"] = entries
-    sh = Share(spec, base)
-    kinds = set()
+    sh = Share(spec, base, cache)
     any_diff = any(x.kind == "diff" for x in sh.maps)
+    first_density = next((x for x in sh.maps if x.kind == "2fofc" and _is_primary_density(x.name)), None) or \
+        next((x for x in sh.maps if x.kind == "2fofc"), None)
+    first_diff = next((x for x in sh.maps if x.kind == "diff"), None)
     for e, x in zip(entries, sh.maps):
         e["kind"] = x.kind
         e["level"] = level if level is not None and (x.kind == "diff" or not any_diff) else x.level
-        e["visible"] = x.kind not in kinds                  # the first map of each kind
-        kinds.add(x.kind)
+        e["visible"] = x is first_density or x is first_diff      # one density and one difference map
         x.level = e["level"]
     diff = next((x for x in sh.maps if x.kind == "diff"), None)
     shown = diff or (sh.maps[0] if sh.maps else None)
@@ -1180,15 +1425,43 @@ def init_spec(models, maps, title=None, units="sigma", unit_label=None, level=No
             pl["name"] += f" ({spec['models'][k - 1]['name']})"
     if shown is not None:
         for pl in spec["planes"]:
-            pl["map"] = shown.name
-    # starting view: the whole structure (without waters), face-on
-    allxyz = np.concatenate([m.xyz[[i for i, inf in enumerate(m.info) if inf[3] not in WATERS
-                                    and m.elements[i] != "H"]] for m in sh.mols])
-    c = allxyz.mean(0)
-    rad = float(np.percentile(np.linalg.norm(allxyz - c, axis=1), 90)) + 2.0
-    spec["view"] = {"center": [round(float(v), 2) for v in c], "radius": round(rad, 1),
-                    "orient": _quat(screen_axes(allxyz, "face"))}
+            pl.setdefault("map", shown.name)
+    # starting view: --center, else the requested planes, else the first automatic plane, else the whole structure
+    focus = [t.strip() for t in center.split(",") if t.strip()] if center else []
+    if not focus:
+        for pl in (spec["planes"][:len(planes)] if planes else spec["planes"][:1]):
+            focus += list(pl.get("atoms") or []) + ([pl["coordination"]] if pl.get("coordination") else [])
+    if focus:
+        try:
+            pts = sh.atoms.xyz(focus)
+        except ValueError as e:
+            raise ValueError(f"--center: {e}") from None
+        c = pts.mean(0)
+        rad = radius or float(np.clip(np.linalg.norm(pts - c, axis=1).max() + 4.0, 8.0, 20.0))
+        spec["view"] = {"center": focus, "radius": round(rad, 1)}
+        if len(pts) == 1:                          # a metal: label it and its ligands, with distances
+            lig = sh.ligands_of(focus[0])
+            if lig:
+                spec["view"]["labels"] = [focus[0]] + [nm for nm, _ in lig]
+                spec["view"]["distances"] = [[focus[0], nm] for nm, _ in lig]
+    else:
+        allxyz = np.concatenate([m.xyz[[i for i, inf in enumerate(m.info) if inf[3] not in WATERS
+                                        and m.elements[i] != "H"]] for m in sh.mols])
+        c = allxyz.mean(0)
+        rad = radius or float(np.percentile(np.linalg.norm(allxyz - c, axis=1), 90)) + 2.0
+        spec["view"] = {"center": [round(float(v), 2) for v in c], "radius": round(rad, 1),
+                        "orient": _quat(screen_axes(allxyz, "face"))}
     return spec
+
+
+def _match_map(names, text):
+    """The map name that text names: exactly, or as the one name that contains it (case ignored)."""
+    if text in names:
+        return text
+    hits = [n for n in names if text.lower() in n.lower()]
+    if len(hits) == 1:
+        return hits[0]
+    raise ValueError(f"no single map matches {text!r}; maps: {names}")
 
 
 def init_main(argv):
@@ -1226,11 +1499,12 @@ def init_main(argv):
         rel = os.path.relpath(os.path.abspath(path), out_dir) + (eq + name)
         (models if path.lower().endswith((".pdb", ".ent", ".cif", ".mmcif", ".pdb.gz", ".cif.gz")) else maps).append(rel)
     try:
+        cache = {}
         spec = init_spec(models, maps, a.title, a.units, a.unit_label, a.level, a.min_peak, a.planes, a.plane, out_dir,
-                         a.description)
+                         a.description, cache=cache)
         with open(a.out, "w") as fh:
             json.dump(spec, fh, indent=1, ensure_ascii=False)
-        sh = Share(spec, out_dir)
+        sh = Share(spec, out_dir, cache)
         check = os.path.splitext(a.out)[0] + ".check.txt"
         with open(check, "w") as fh:
             fh.write(sh.report())
@@ -1256,7 +1530,7 @@ def list_model(path):
     out = [f"{path}: " + (f"{st.spacegroup_hm}, cell " + " ".join(f"{v:g}" for v in st.cell.parameters)
                           if st.cell.is_crystal() else "no crystal cell") + f"; {len(st)} model(s), the first listed"]
     ns = gemmi.NeighborSearch(st[0], st.cell, 5).populate()
-    ligands, ions, waters, alts = {}, {}, 0, []
+    ligands, ions, waters, alts = {}, {}, [], []
     for ch in st[0]:
         poly = [r for r in ch if (t := gemmi.find_tabulated_residue(r.name)) is not None
                 and (t.is_amino_acid() or t.is_nucleic_acid())]
@@ -1271,7 +1545,7 @@ def list_model(path):
             if r in poly:
                 continue
             if r.name in WATERS:
-                waters += 1
+                waters.append(spec)
                 continue
             heavy = [a for a in r if a.element.name != "H"]
             if len(heavy) == 1:
@@ -1282,7 +1556,11 @@ def list_model(path):
                     d = st.cell.find_nearest_image(a.pos, m.pos, gemmi.Asu.Any).dist()
                     if m.to_cra(st[0]).atom.element.name != "H" and 0.1 < d <= cut:
                         near.add((m.chain_idx, m.residue_idx, m.atom_idx, round(d, 3)))
-                ions.setdefault((r.name, a.name, cut), []).append(f"{spec} ({len(near)})")
+                names = []
+                for ci, ri, ai, d in sorted(near, key=lambda t: t[3]):
+                    cra = st[0][ci][ri]
+                    names.append(f"{st[0][ci].name}/{cra.seqid.num}{cra.seqid.icode.strip()} {cra[ai].name} {d:.2f}")
+                ions.setdefault((r.name, a.name, cut), []).append(f"{spec} ({len(near)}: " + ", ".join(names) + ")")
             else:
                 ligands.setdefault((r.name, len(heavy)), []).append(spec)
     for (name, n), specs in ligands.items():
@@ -1290,25 +1568,246 @@ def list_model(path):
     for (name, atom, cut), specs in ions.items():
         out.append(f"  {name} (atom {atom}; atoms within {cut:g} A): " + ", ".join(specs[:40])
                    + (" ..." if len(specs) > 40 else ""))
-    out.append(f"  waters: {waters}")
+    out.append(f"  waters: {len(waters)}" + (f" ({', '.join(waters[:3])}{' ...' if len(waters) > 4 else ''}"
+                                             f"{', ' + waters[-1] if len(waters) > 3 else ''})" if waters else ""))
     if alts:
         out.append(f"  alternate conformers in {len(alts)} residues: " + ", ".join(alts[:30])
                    + (" ..." if len(alts) > 30 else "") + " (specs without :B take the first conformer)")
     return "\n".join(out)
 
 
+def list_atoms(path, text):
+    """The atoms of the residues a spec or residue name names, one line per residue."""
+    st = gemmi.read_structure(path)
+    out = []
+    want = text.strip()
+    for ch in st[0]:
+        for r in ch:
+            spec = f"{ch.name}/{r.seqid.num}{r.seqid.icode.strip()}"
+            if want.upper() in (r.name.upper(), spec) or want == f"{spec} {r.name}":
+                out.append(f"  {spec} {r.name}: " + " ".join(
+                    a.name + (f":{a.altloc}" if a.altloc != "\0" else "") for a in r if a.element.name != "H"))
+    return "\n".join(out) or f"  no residue {text!r}"
+
+
 def list_main(argv):
     ap = argparse.ArgumentParser(prog="moorlight share list", description=
-                                 "List chains, residue ranges, ligands, metals and waters of models, as atom specs.")
-    ap.add_argument("models", nargs="+")
+                                 "List chains, residue ranges, ligands, metals (with their ligand atoms) and waters of "
+                                 "a model, as atom specs; with residues, their atom names.")
+    ap.add_argument("models", nargs="+", help="model files; after them, residues to list atoms of (A/501 or RET)")
     a = ap.parse_args(argv)
+    files = [m for m in a.models if os.path.exists(m)]
+    residues = [m for m in a.models if not os.path.exists(m)]
     try:
-        for m in a.models:
-            print(list_model(m))
+        for m in files:
+            print(list_model(m) if not residues else f"{m}:")
+            for r in residues:
+                print(list_atoms(m, r))
     except (ValueError, OSError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0
+
+
+MODEL_EXT = (".pdb", ".ent", ".cif", ".mmcif", ".pdb.gz", ".cif.gz", ".ent.gz")
+MAP_EXT = (".mtz", ".ccp4", ".map", ".mrc", ".map.gz", ".ccp4.gz")
+
+
+def _fetch_pdb_redo(code, out_dir):
+    """Download the PDB-REDO model and map coefficients of a PDB entry -> [model path, mtz path]."""
+    import urllib.request
+    code = code.lower()
+    d = os.path.join(out_dir, code)
+    os.makedirs(d, exist_ok=True)
+    got = []
+    for ext in ("pdb", "mtz"):
+        dst = os.path.join(d, f"{code}_final.{ext}")
+        if not os.path.exists(dst):
+            url = f"https://pdb-redo.eu/db/{code}/{code}_final.{ext}"
+            try:
+                with urllib.request.urlopen(url, timeout=60) as r, open(dst + ".part", "wb") as fh:
+                    fh.write(r.read())
+                os.replace(dst + ".part", dst)
+            except OSError as e:
+                raise ValueError(f"{code}: could not download {url} ({e}); give the model and map files instead")
+        got.append(dst)
+    return [f"{got[0]}={code.upper()}", got[1]]
+
+
+def _expand_folder(d):
+    """A refinement folder -> model and map arguments ('path=name'), for the layouts Moorlight knows:
+    TorchRef difference refinement (*_dark.pdb, *_light.pdb, *difference_data.mtz, *_dark-sf.mtz; or D.pdb,
+    L_refined.pdb, difference_data.mtz), TorchRef refinement (refined.pdb + refined.mtz), or one model and its maps."""
+    names = sorted(os.listdir(d))
+    j = lambda n: os.path.join(d, n)
+    diff = [n for n in names if n.endswith("difference_data.mtz")]
+    if diff:
+        pre = diff[0][:-len("difference_data.mtz")]
+        out = []
+        for n, name in ((pre + "dark.pdb", "dark"), ("D.pdb", "dark"), (pre + "light.pdb", "light"),
+                        ("L_refined.pdb", "light")):
+            if n in names and not any(o.endswith("=" + name) for o in out):
+                out.append(f"{j(n)}={name}")
+        out.append(j(diff[0]))
+        for n, name in ((pre + "dark-sf.mtz", "dark"), ("D.mtz", "dark")):
+            if n in names:
+                out.append(f"{j(n)}={name}")
+                break
+        return out
+    if "refined.pdb" in names and "refined.mtz" in names:
+        return [j("refined.pdb"), j("refined.mtz")]
+    models = [n for n in names if n.lower().endswith(MODEL_EXT) and "-sf" not in n]
+    maps = [n for n in names if n.lower().endswith(MAP_EXT)]
+    if len(models) == 1 and maps:
+        return [j(models[0])] + [j(n) for n in maps]
+    raise ValueError(f"{d}: not a refinement folder I know (models {models}, maps {maps}); give the files")
+
+
+def _spec_args(argv):
+    """Specs may start with '-' (chain '-'): '--at -/1' -> '--at=-/1'."""
+    fixed, k = [], 0
+    while k < len(argv):
+        if argv[k] in ("--at", "--near", "--frame", "--center", "--label", "--distance") and k + 1 < len(argv):
+            fixed.append(f"{argv[k]}={argv[k + 1]}")
+            k += 2
+        else:
+            fixed.append(argv[k])
+            k += 1
+    return fixed
+
+
+def build_main(argv, prog="moorlight-share"):
+    ap = argparse.ArgumentParser(prog=prog, description=
+                                 "Build a viewer page from model and map files in one command, and print what it "
+                                 "shows. Atom specs: 'A/85 CA', 'A/85' (residue), '2#A/85 SG' (model 2), or a residue "
+                                 "name: 'RET', 'ZN', 'AZM C1' (the most buried one if there are several).",
+                                 epilog="Other commands: `moorlight-share list MODEL [RESIDUE ...]` (what a model holds; "
+                                        "a residue's atom names), `moorlight-share again PAGE.spec.json [options]` "
+                                        "(the same page with more options), `moorlight-share SPEC.json --check` (the "
+                                        "numbers of a spec).")
+    ap.add_argument("inputs", nargs="+", help="model files (.pdb/.cif) and maps (.mtz/.ccp4/.map/.mrc); name one with "
+                                              "path=name (file.mtz=name:F,PHI picks columns, F*W,PHI weights F); a "
+                                              "refinement folder (TorchRef layouts); or a PDB id (PDB-REDO files)")
+    ap.add_argument("-o", "--out", required=True, help="page to write (.html)")
+    ap.add_argument("--title", help="page name, two to four words")
+    ap.add_argument("--description", help="one line under the title")
+    ap.add_argument("--center", metavar="SPECS", help="what the page opens on (comma-separated specs; a metal gets its "
+                                                      "ligands labelled); default: the --plane atoms, else the strongest "
+                                                      "difference feature, else the most buried ligand")
+    ap.add_argument("--radius", type=float, help="A from the centre to the screen edge at the start")
+    ap.add_argument("--plane", action="append", default=[], metavar="NAME=SPECS[; option=value]",
+                    help="a preset slice plane (repeatable): 'Ring=A/401 C1, A/401 N1, A/401 C2' (best plane), "
+                         "'Zn site=ZN' (one atom: its coordination plane), with options after ';': copies=-1,1  "
+                         "toward=SPEC (side of +)  thickness=2  offset=1  axis=A,B  center=SPEC  "
+                         "perpendicular-to=PLANE (then the atoms give a line in the plane)  map=NAME  level=4")
+    ap.add_argument("--planes", type=int, help="automatic planes when no --plane is given (default 5)")
+    ap.add_argument("--label", action="append", default=[], metavar="SPECS", help="atoms to label (comma-separated)")
+    ap.add_argument("--distance", action="append", default=[], metavar="A, B", help="a distance to draw")
+    ap.add_argument("--show", action="append", default=[], metavar="MAP", help="show this map at the start")
+    ap.add_argument("--hide", action="append", default=[], metavar="MAP", help="hide this map at the start")
+    ap.add_argument("--drop", action="append", default=[], metavar="MAP", help="leave this map out of the page")
+    ap.add_argument("--level", action="append", default=[], metavar="[MAP=]LEVEL",
+                    help="contour level: LEVEL for the difference maps, MAP=LEVEL for one map (repeatable)")
+    ap.add_argument("--units", choices=["sigma", "absolute"], default="sigma",
+                    help="absolute: maps already in their own units, e.g. noise SD (with --unit-label SD)")
+    ap.add_argument("--unit-label", help="text after levels, e.g. SD")
+    ap.add_argument("--min", type=float, dest="min_peak", help="automatic planes: features from this level on")
+    ap.add_argument("--standalone", action="store_true", help="a full HTML document to send as a file (e-mail, "
+                                                              "messenger, supplement); without it, an artifact page")
+    ap.add_argument("--at", action="append", default=[], metavar="SPECS", help="also print map values at these atoms")
+    ap.add_argument("--near", action="append", default=[], metavar="SPEC", help="also print atoms and peaks around this")
+    ap.add_argument("--near-radius", type=float, default=5.0)
+    a = ap.parse_args(_spec_args(argv))
+    out = os.path.abspath(a.out)
+    out_dir = os.path.dirname(out)
+    os.makedirs(out_dir, exist_ok=True)
+    stem = os.path.splitext(out)[0]
+    try:
+        files = []
+        for f in a.inputs:
+            path = f.partition("=")[0]
+            if os.path.isdir(path):
+                files += _expand_folder(path)
+            elif not os.path.exists(path) and re.fullmatch(r"\d[A-Za-z0-9]{3}", path):
+                files += _fetch_pdb_redo(path, out_dir)
+            elif not os.path.exists(path):
+                raise ValueError(f"no file {path}")
+            else:
+                files.append(f)
+        models, maps = [], []
+        for f in files:
+            path, eq, name = f.partition("=")
+            rel = os.path.relpath(os.path.abspath(path), out_dir) + (eq + name)
+            (models if path.lower().endswith(MODEL_EXT) else maps).append(rel)
+        diff_level = [float(v) for v in a.level if "=" not in v]
+        cache = {}
+        spec = init_spec(models, maps, a.title, a.units, a.unit_label, diff_level[-1] if diff_level else None,
+                         a.min_peak, a.planes, a.plane, out_dir, a.description, a.center, a.radius, a.drop, cache)
+        names = [m["name"] for m in spec["maps"]]
+        for v in a.level:
+            if "=" in v:
+                n, _, lv = v.rpartition("=")
+                spec["maps"][names.index(_match_map(names, n.strip()))]["level"] = float(lv)
+        for n in a.show:
+            spec["maps"][names.index(_match_map(names, n))]["visible"] = True
+        for n in a.hide:
+            spec["maps"][names.index(_match_map(names, n))]["visible"] = False
+        view = spec["view"]
+        for t in a.label:
+            view.setdefault("labels", []).extend(x.strip() for x in t.split(",") if x.strip())
+        for t in a.distance:
+            pair = [x.strip() for x in t.split(",") if x.strip()]
+            if len(pair) != 2:
+                raise ValueError(f"--distance {t!r}: give two atoms, 'A, B'")
+            view.setdefault("distances", []).append(pair)
+        spec["command"] = [os.path.abspath(f.partition("=")[0]) + f.partition("=")[1] + f.partition("=")[2]
+                           if os.path.exists(f.partition("=")[0]) else f for f in a.inputs]
+        opts, k = [x for x in argv if x not in a.inputs], 0
+        while k < len(opts):                       # the page path, absolute, so `again` works from anywhere
+            if opts[k] in ("-o", "--out"):
+                spec["command"] += ["-o", out]
+                k += 2
+            else:
+                spec["command"] += ["-o", out] if opts[k].startswith("--out=") else [opts[k]]
+                k += 1
+        sh = Share(spec, out_dir, cache)
+        page = sh.html(standalone=a.standalone)
+        with open(out, "w") as fh:
+            fh.write(page)
+        with open(stem + ".spec.json", "w") as fh:
+            json.dump(spec, fh, indent=1, ensure_ascii=False)
+        with open(stem + ".check.txt", "w") as fh:
+            fh.write(sh.report())
+        size = len(page.encode())
+        print(sh.summary(out, size))
+        if a.at or a.near:
+            print(sh.report(a.at, a.near, a.near_radius))
+        print(f"also wrote {stem}.check.txt (every number) and {stem}.spec.json; to change the page, run "
+              f"`moorlight-share again {stem}.spec.json` with more options (later options win; --plane adds)")
+        if size > MAX_BYTES:
+            print(f"warning: {size / 1e6:.1f} MB is more than an artifact page may hold (16 MB); --drop a map",
+                  file=sys.stderr)
+            return 2
+        if a.standalone and size > 7e6:
+            print(f"note: {size / 1e6:.1f} MB; e-mail encoding adds a third, so some mail servers (10 MB) will refuse "
+                  "it; --drop a map, or send a link", file=sys.stderr)
+    except (ValueError, OSError, RuntimeError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def again_main(argv):
+    """Re-run the command recorded in a page's spec with more options."""
+    if not argv or not argv[0].endswith(".json"):
+        print("usage: moorlight-share again PAGE.spec.json [more options]", file=sys.stderr)
+        return 1
+    with open(argv[0]) as fh:
+        spec = json.load(fh)
+    if not spec.get("command"):
+        print(f"error: {argv[0]} has no recorded command (it was not made by a build)", file=sys.stderr)
+        return 1
+    return build_main(spec["command"] + argv[1:])
 
 
 def main(argv=None):
@@ -1317,6 +1816,10 @@ def main(argv=None):
         return init_main(argv[1:])
     if argv and argv[0] == "list":
         return list_main(argv[1:])
+    if argv and argv[0] == "again":
+        return again_main(argv[1:])
+    if not any(x.endswith(".json") for x in argv if not x.startswith("-")):
+        return build_main(argv)
     # specs may start with '-' (chain '-'): '--at -/1' -> '--at=-/1'
     fixed, k = [], 0
     while k < len(argv):
