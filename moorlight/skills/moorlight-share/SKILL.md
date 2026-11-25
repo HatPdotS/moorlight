@@ -90,7 +90,13 @@ and scipy). There is no server and no port.
    - Publish it as an artifact: Artifact tool with `file_path` = the page, `icon` "molecule", a one-sentence
      `description`. The page is in the artifact form, without `<!doctype>`/`<html>`/`<head>`/`<body>`.
    - Republishing the same file path keeps the link.
-   - Or build with `--standalone` for a file someone opens locally in a browser.
+   - Or build with `--standalone` for a file to send (e-mail, messenger, a paper's supplement or a Zenodo
+     deposit). The page fetches nothing: three.js (0.170.0, MIT) is written into it and it uses system fonts, so it
+     opens offline in any current browser with WebGL 2.
+     - Desktop and Android browsers run it from the file. On an iPhone, a file preview (Mail, WhatsApp, Files) may
+       not run it; send iPhone users a link instead (the artifact, or the file on a web server).
+     - Its "About this file" section lists the input files with SHA-256 checksums, the Moorlight version and
+       commit, the build time and the spec (file names only).
    - A machine without a browser cannot render the page. Say so if you could not look at it.
 
 ## What the numbers mean

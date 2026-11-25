@@ -1,8 +1,5 @@
 <title>{{TITLE}}</title>
 <meta name="description" content="{{DESCRIPTION}}">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap">
 <style>
 /* Layout: a Coot-black viewport; the tour panel sits below it on an upright phone and beside it in landscape and
    on wide screens. Full screen hides header and panel and leaves a small floating stop bar. One deliberate dark
@@ -18,8 +15,8 @@
   --pos: #00d000;          /* + contour */
   --neg: #e00000;          /* - contour */
   --map: #3d7fff;          /* 2mFo-DFc-like maps */
-  --font-ui: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
-  --font-data: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;     /* system fonts: the page fetches nothing */
+  --font-data: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   color-scheme: dark;
 }
 html { height: 100%; box-sizing: border-box; }
@@ -170,6 +167,10 @@ details[hidden] { display: none; }
 #app.live-off .slice-box .ctl-row, #app.live-off #mini-depth input, #app.live-off #mini-depth output { opacity: 0.4; }
 #app:not(.slicing) .slice-only { display: none !important; }
 .help { margin: 0; color: var(--muted); font-size: 0.82rem; max-width: 65ch; }
+.about p { margin: 0 0 0.6em; }
+.about ul { list-style: none; margin: 0 0 0.6em; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.about .hash, .about pre { font: 0.72rem/1.35 var(--font-data); overflow-wrap: anywhere; white-space: pre-wrap; margin: 0; }
+.about li > span:first-child { color: var(--fg); }
 kbd { font: 0.8rem var(--font-data); }
 
 @media (min-width: 900px) and (min-height: 561px) {
@@ -286,6 +287,10 @@ kbd { font: 0.8rem var(--font-data); }
         <button id="reset" type="button">Reset view</button>
       </div>
     </div>
+    <details class="help about">
+      <summary>About this file</summary>
+      <div id="about"></div>
+    </details>
     <details class="help">
       <summary>Controls</summary>
       <p>Drag to rotate, pinch to zoom (zoom only magnifies; it never moves you into the structure), move two
@@ -308,12 +313,6 @@ kbd { font: 0.8rem var(--font-data); }
   </section>
 </div>
 
-<script type="importmap">
-{ "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
-} }
-</script>
 <script type="module">
 {{SCRIPT}}
 </script>

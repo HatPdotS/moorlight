@@ -1,7 +1,7 @@
 """Shareable snapshot: one self-contained HTML viewer page with models, maps and preset slice planes.
 
-No server is needed to view it. The page contours the maps itself (three.js from a CDN), so it can be sent as a
-file or published as a claude.ai artifact and opened on a phone.
+No server or network is needed to view it: the page carries three.js and contours the maps itself, so it can be sent
+as a file (e-mail, messenger, a paper's supplement) or published as a claude.ai artifact and opened on a phone.
 
     moorlight share init model.pdb maps.mtz -o spec.json --build view.html    # draft spec (and page) from files
     moorlight share spec.json -o view.html        # build the page
@@ -26,12 +26,15 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import gzip
+import hashlib
 import html
 import itertools
 import json
 import os
 import re
+import subprocess
 import sys
 
 import gemmi
@@ -45,6 +48,78 @@ from .session import parse_atom_spec
 WEB = os.path.join(os.path.dirname(__file__), "web")
 MAX_BYTES = 15 * 1024 * 1024    # artifact pages must stay at or below 16 MB
 POINT_BUDGET = 8_000_000        # grid points stored for all maps together (~1.4 bytes each on the page)
+THREE_VERSION = "0.170.0"       # vendored in web/vendor (MIT); written into every page
+THREE_DIR = os.path.join(WEB, "vendor", f"three-{THREE_VERSION}")
+THREE_ADDONS = ("lines/LineSegmentsGeometry.js", "lines/LineMaterial.js", "lines/LineSegments2.js",
+                "objects/MarchingCubes.js")     # the addons the page uses, in dependency order
+
+
+def three_bundle():
+    """three.js and the addons the page uses as plain script text: each file runs in its own function scope and hands
+    its exports on, so the page loads no modules and fetches nothing (from a file, an e-mail attachment or an
+    artifact alike)."""
+    with open(os.path.join(THREE_DIR, "LICENSE")) as fh:
+        parts = [f"/* three.js {THREE_VERSION}, https://threejs.org\n{fh.read().strip()}\n*/"]
+    with open(os.path.join(THREE_DIR, "three.module.min.js")) as fh:
+        src = fh.read()
+    m = re.search(r"export\s*\{([^}]*)\}\s*;?\s*$", src)
+    if not m or len(re.findall(r"\bexport\b", src)) != 1:
+        raise RuntimeError("three.module.min.js: expected one export statement at the end")
+    names = [q.strip().split(" as ") for q in m.group(1).split(",") if q.strip()]
+    exports = ",".join(f"{n[-1]}:{n[0]}" for n in names)
+    parts.append(f"const THREE = (() => {{\n{src[:m.start()]}\nreturn Object.freeze({{{exports}}});\n}})();")
+    for f in THREE_ADDONS:
+        with open(os.path.join(THREE_DIR, f)) as fh:
+            t = fh.read()
+        t = re.sub(r"import\s*(\{[^}]*\})\s*from\s*'three';", r"const \1 = THREE;", t)
+        t = re.sub(r"import\s*\{[^}]*\}\s*from\s*'\.\./[^']*';\n?", "", t)    # an earlier addon, already in scope
+        ex = re.search(r"export\s*(\{[^}]*\})\s*;", t)
+        body = t[:ex.start()] + t[ex.end():] if ex else t
+        if not ex or re.search(r"^\s*(import|export)\b", body, re.M):
+            raise RuntimeError(f"three.js addon {f}: unexpected import/export statements")
+        parts.append(f"// three.js {THREE_VERSION} {f}\nconst {ex.group(1)} = (() => {{\n{body}\nreturn {ex.group(1)};\n}})();")
+    return "\n".join(parts) + "\n"
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _source_version():
+    """Moorlight version and, in a git checkout, the commit (with -dirty for uncommitted changes)."""
+    from . import __version__
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        out = subprocess.run(["git", "-C", here, "describe", "--always", "--dirty", "--abbrev=10"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return __version__, out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    d = here                                  # no git program (e.g. in a container): read the checkout
+    while d != os.path.dirname(d) and not os.path.isdir(os.path.join(d, ".git")):
+        d = os.path.dirname(d)
+    g = os.path.join(d, ".git")
+    try:
+        with open(os.path.join(g, "HEAD")) as fh:
+            head = fh.read().strip()
+        if head.startswith("ref: "):
+            ref = head[5:]
+            if os.path.exists(os.path.join(g, ref)):
+                with open(os.path.join(g, ref)) as fh:
+                    return __version__, fh.read().strip()[:10]
+            with open(os.path.join(g, "packed-refs")) as fh:
+                for line in fh:
+                    if line.strip().endswith(" " + ref):
+                        return __version__, line.split()[0][:10]
+            return __version__, None
+        return __version__, head[:10]
+    except OSError:
+        return __version__, None
 NEIGHBOUR_COLOR = "#8a9099"
 WATERS = ("HOH", "WAT", "DOD", "H2O")
 _TAGGED = re.compile(r"^(.*?)\s*\[([^\]]*)\]\s*$")
@@ -685,7 +760,23 @@ class Share:
                      "radius": 12.0, "slab": 12.0, "maps": {}, "labels": [], "distances": []}
         return {"title": self.spec.get("title", "Moorlight"), "description": self.spec.get("description", ""),
                 "contour_radius": float(self.spec.get("contour_radius", 10.0)), "models": mols,
-                "maps": [x.to_json() for x in self.maps], "planes": planes, "start": start}
+                "maps": [x.to_json() for x in self.maps], "planes": planes, "start": start, "about": self.about()}
+
+    def about(self):
+        """What the page was made from, for its About section: the input files with checksums, the tool and the
+        build time, and the spec (file names without their directories)."""
+        inputs, spec = [], json.loads(json.dumps(self.spec))
+        for role, key in (("model", "models"), ("map", "maps")):
+            for e in spec.get(key) or []:
+                path = _path(e["path"], self.base)
+                inputs.append({"role": role, "name": e.get("name") or os.path.basename(path),
+                               "file": os.path.basename(path), "columns": e.get("columns"),
+                               "bytes": os.path.getsize(path), "sha256": _sha256(path)})
+                e["path"] = os.path.basename(path)
+        version, commit = _source_version()
+        built = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return {"inputs": inputs, "moorlight": version, "commit": commit, "built": built, "three": THREE_VERSION,
+                "spec": spec}
 
     def html(self, standalone=False):
         data = json.dumps(self.payload(), separators=(",", ":")).replace("</", "<\\/")
@@ -693,9 +784,15 @@ class Share:
             page = fh.read()
         with open(os.path.join(WEB, "share.js")) as fh:
             js = fh.read()
+        js = re.sub(r'^import [^;]* from "three(/addons/[\w/]+\.js)?";\n', "", js, flags=re.M)   # in the bundle
+        if re.search(r"^import\b", js, re.M):
+            raise RuntimeError("share.js imports something the three.js bundle does not provide")
+        script = three_bundle() + js
+        if "</script" in script.lower():
+            raise RuntimeError("page script contains '</script'")
         page = (page.replace("{{TITLE}}", html.escape(self.spec.get("title", "Moorlight")))
                 .replace("{{DESCRIPTION}}", html.escape(self.spec.get("description", "")))
-                .replace("{{SCRIPT}}", js)
+                .replace("{{SCRIPT}}", script)
                 .replace("{{DATA}}", data))
         if standalone:
             page = ("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n"
@@ -1219,7 +1316,8 @@ def main(argv=None):
                     help="with --check: list only this map (repeatable)")
     ap.add_argument("--frame", metavar="SPECS", help="with --near: atoms (comma-separated) whose plane gives h")
     ap.add_argument("--standalone", action="store_true",
-                    help="full HTML document for opening as a local file (artifact pages must not have it)")
+                    help="full HTML document, for sending as a file (e-mail, messenger, supplement); artifact pages "
+                         "must not have it")
     a = ap.parse_args(fixed)
     with open(a.spec) as fh:
         spec = json.load(fh)

@@ -1,6 +1,6 @@
 // Moorlight share page: a read-only viewer for a snapshot written by `moorlight share`.
-// Models, map boxes and preset planes are embedded in the page; maps are contoured here (marching cubes),
-// so no server is needed. Drawing follows the main viewer (app.js): Coot colours, sticks, chicken wire.
+// Models, map boxes and preset planes are embedded in the page, and the build puts three.js in front of this
+// script; maps are contoured here (marching cubes), so neither a server nor the network is needed. Drawing follows the main viewer (app.js): Coot colours, sticks, chicken wire.
 import * as THREE from "three";
 import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
@@ -1141,6 +1141,31 @@ function applyView() {
   status("");
 }
 
+// ------------------------------------------------------------------- about
+// what the page was made from: input files with SHA-256 checksums, the tool, the build time and the spec
+function renderAbout() {
+  const a = DATA.about, box = $("#about");
+  if (!a || !box) return;
+  const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
+  box.append(el("p", "Everything shown is stored in this file. It needs no network and opens in any current browser " +
+    "with WebGL 2; on a phone, open it in the browser (a file preview may not run it)."));
+  box.append(el("p", `Made with Moorlight ${a.moorlight}${a.commit ? ` (${a.commit})` : ""} on ${a.built}. ` +
+    `Includes three.js ${a.three} (MIT licence).`));
+  box.append(el("p", "Input files (SHA-256):"));
+  const ul = el("ul");
+  for (const f of a.inputs) {
+    const li = el("li");
+    const mb = f.bytes >= 1e6 ? `${(f.bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(f.bytes / 1e3))} kB`;
+    li.append(el("span", `${f.role === "map" ? "Map" : "Model"} "${f.name}": `), el("span", `${f.file}` +
+      `${f.columns ? ` (${f.columns})` : ""}, ${mb}`), el("div", f.sha256, "hash"));
+    ul.append(li);
+  }
+  box.append(ul);
+  const det = el("details");
+  det.append(el("summary", "Spec used to build this page"), el("pre", JSON.stringify(a.spec, null, 1)));
+  box.append(det);
+}
+
 // ---------------------------------------------------------------- structure
 function renderModelList() {
   const ul = $("#mol-list");
@@ -1579,6 +1604,7 @@ async function start() {
   }
   renderMapList();
   renderModelList();
+  renderAbout();
   loadPresetPlanes();
   loadPlanes();
   renderPlaneList();

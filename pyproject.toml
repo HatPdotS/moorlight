@@ -34,4 +34,4 @@ moorlight-mcp = "moorlight.mcp:main"
 packages = ["moorlight", "moorlight.web"]
 
 [tool.setuptools.package-data]
-moorlight = ["web/*", "skills/*/SKILL.md"]
+moorlight = ["web/*", "web/vendor/*/*", "web/vendor/*/*/*", "skills/*/SKILL.md"]

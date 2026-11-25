@@ -100,6 +100,11 @@ the same rules.
 claude.ai artifact, or as a file opened locally. The page holds the models, their symmetry neighbours, the maps on
 their own grids, and preset slice planes. The browser contours the maps itself (mesh, or an Olex2-style slice).
 
+The page fetches nothing: three.js 0.170.0 (MIT, vendored in `moorlight/web/vendor`) is written into it and it uses
+system fonts. A `--standalone` page can be sent by e-mail or messenger or deposited with a paper and opens offline in
+any current browser with WebGL 2 (on an iPhone, open a link rather than a file preview). Its "About this file" section
+lists the input files with SHA-256 checksums, the Moorlight version and commit, and the build time.
+
 ```
 moorlight-share init model.pdb maps.mtz -o spec.json --plane "Ligand=A/401" --build page.html
 moorlight-share spec.json --check          # peaks, planes and values at atoms, as the page shows them
