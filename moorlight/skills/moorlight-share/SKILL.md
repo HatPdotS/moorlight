@@ -21,7 +21,7 @@ whole job should take about 30 s: run the command, publish, reply. You never wri
        - TorchRef difference refinement: dark and light models, the q-weighted light − dark map, the extrapolated light map, and the dark 2mFo-DFc and mFo-DFc maps;
        - TorchRef refinement output;
        - any folder with one model and its maps.
-     - model and map files (`.pdb/.cif`, `.mtz/.ccp4/.map/.mrc`), optionally named: `dark.pdb=dark`, `2ns.ccp4="2 ns"`.
+     - model and map files (`.pdb/.cif`, `.mtz/.ccp4/.map/.mrc`), optionally named: `dark.pdb=dark`, `10ps.ccp4="10 ps"`.
      - a PDB id (`3hs4`), which downloads the PDB-REDO model and maps into DIR.
    - **Atom specs** come in these forms:
      - `A/85 CA` is an atom; `A/85` is a residue (all its heavy atoms);
@@ -90,14 +90,14 @@ ligands.
 **Examples:**
 
 ```
-moorlight-share /path/to/torchref_difference_run --title "bR 15 ms" --center "RET, A/216 NZ" \
+moorlight-share /path/to/torchref_difference_run --title "Light minus dark" --center "RET, A/216 NZ" \
   --plane "Retinal=RET C5, RET C7, RET C9, RET C11, RET C13, RET C15, A/216 NZ; copies=-1,1" \
   --plane "Across the chain=RET C7, A/216 NZ; perpendicular-to=Retinal; center=A/216 NZ; toward=RET C20" \
   -o out/br.html
 moorlight-share 3hs4 --title "Carbonic anhydrase acetazolamide" --center ZN --plane "Zn site=ZN" \
   --plane "Ring=AZM C1, AZM N3, AZM N2, AZM C2, AZM S2" -o out/ca2.html --standalone
-moorlight-share dark.pdb=dark E.pdb=E 2ns.ccp4="2 ns" 3p5us.ccp4="3.5 µs" --units absolute --unit-label SD \
-  --level 4 --plane "Pd1=A/1 PD" --plane "Azo=-/102 C8, -/102 N9, -/102 N10, -/102 C11; copies=-2,-1,1,2" -o out/cage.html
+moorlight-share dark.pdb=dark excited.pdb=excited 10ps.ccp4="10 ps" 1ns.ccp4="1 ns" --units absolute --unit-label SD \
+  --level 4 --plane "Cu site=A/1 CU" --plane "Ring=A/401 C1, A/401 C2, A/401 C3, A/401 C4; copies=-2,-1,1,2" -o out/compare.html
 moorlight-share again out/br.spec.json --plane "Asp85=A/85" --label "A/85 OD1, A/85 OD2"
 ```
 
